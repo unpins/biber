@@ -242,16 +242,31 @@
           };
         in
         biberBin;
+      base = ulib.mkStandaloneFlake {
+        inherit self;
+        name = "biber";
+        embedMan = true;
+        smoke = [ "--version" ];
+        smokePattern = "biber";
+        # darwin + windows are proven in the spike but their VFS-embed is not
+        # wired here yet; ship Linux first.
+        linuxOnly = true;
+        build = pkgs: mk pkgs;
+      };
     in
-    ulib.mkStandaloneFlake {
-      inherit self;
-      name = "biber";
-      embedMan = true;
-      smoke = [ "--version" ];
-      smokePattern = "biber";
-      # darwin + windows are proven in the spike but their VFS-embed is not wired
-      # here yet; ship Linux first.
-      linuxOnly = true;
-      build = pkgs: mk pkgs;
+    # mkStandaloneFlake also emits the cross linux targets (linux-i686/ppc64le/
+    # riscv64/armv7l). The recipe runs the *target* perl for codegen, which only
+    # works where the build host can execute it -- the two NATIVE arches
+    # (x86_64 + aarch64-via-arm-runner). The cross targets need the perl-cross
+    # codegen flow (build-host perl + target toolchain), not yet wired. Drop them
+    # from `packages` so action-build's auto-discovered matrix builds only what
+    # works; native x86_64 and aarch64 ship now.
+    base // {
+      packages = base.packages // {
+        x86_64-linux = builtins.removeAttrs (base.packages.x86_64-linux or { })
+          [ "linux-i686" "linux-ppc64le" "linux-riscv64" ];
+        aarch64-linux = builtins.removeAttrs (base.packages.aarch64-linux or { })
+          [ "linux-armv7l" ];
+      };
     };
 }
