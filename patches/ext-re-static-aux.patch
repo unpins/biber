@@ -1,0 +1,32 @@
+Trigger PERL_EXT_RE_STATIC when usedl is undef, not just on LINKTYPE=static.
+
+ext/re/Makefile.PL conditions `-DPERL_EXT_RE_STATIC` on
+`$args{LINKTYPE} eq "static"`. That's MakeMaker's per-extension hint, which
+is only set reliably when MakeMaker is invoked as part of a fully-resolved
+static build of *this extension*. perl-cross (the cross-compile path used by
+cosmocc) doesn't propagate that hint, so `re_comp.o` emits the
+`PERL_RE_BUILD_AUX` bodies (Perl_reg_add_data, Perl_populate_anyof_bitmap_*,
+Perl_set_ANYOF_arg, Perl_add_above_Latin1_folds, Perl_get_ANYOFM_contents,
+Perl_get_ANYOFHbbm_contents) and they then collide with the same symbols
+already defined in libperl.a at the final `perl` exec link.
+
+`$Config{usedl}` is a strictly stronger signal: when usedl is undef the whole
+perl is statically linked and every extension is necessarily static — there's
+no ambiguity for MakeMaker to resolve. Treating an empty `usedl` as
+sufficient to fire `-DPERL_EXT_RE_STATIC` also matches what already happens
+in the native pkgsStatic.perl build (musl-ld is lenient and silently picks
+one of the duplicate definitions; ld.bfd shipped with cosmocc isn't, so the
+collision is fatal there). Setting the flag suppresses the duplicate
+emission at the source instead of letting the linker paper over it.
+
+--- a/ext/re/Makefile.PL
++++ b/ext/re/Makefile.PL
+@@ -32,7 +32,7 @@ my %args;
+ for my $arg (@ARGV) {
+     $args{$1} = $2 if $arg =~ /^(\w+)=(.*)$/;
+ }
+-if ($args{LINKTYPE} eq "static") {
++if ($args{LINKTYPE} eq "static" || !$Config{usedl}) {
+     $defines .= ' -DPERL_EXT_RE_STATIC';
+ }
+

@@ -32,10 +32,101 @@
       mk = pkgs:
         let
           sp = pkgs.pkgsStatic;
-          perl = sp.perl;
           lib = pkgs.lib;
+          # The static perl. The ext/re static extension re-emits regexp-aux
+          # symbols (Perl_set_ANYOF_arg, …) already in libperl.a; native musl-ld
+          # silently dedups, but the cross ld.bfd (riscv64/ppc64le/armv7l,
+          # binutils 2.46) treats it as a fatal multiple-definition. The patch
+          # fires -DPERL_EXT_RE_STATIC whenever usedl is undef (always true for
+          # this -Uusedl perl), suppressing the duplicate at the source. Benign
+          # for the arches that linked before.
+          host = sp.stdenv.hostPlatform;
+          isDarwin = host.isDarwin or false;
+          prefix = sp.stdenv.cc.targetPrefix;
+          perl = sp.perl.overrideAttrs (old: {
+            # On a case-insensitive FS (the darwin<->darwin cross) perl-cross's
+            # configure clobbers perl's Configure, so nixpkgs' no-sys-dirs.patch
+            # (which patches Configure) can't apply -- and is moot there (the
+            # cross uses perl-cross's own configure). Drop it for the darwin cross.
+            patches = (
+              let base = old.patches or [ ];
+              in if crossCompiling && isDarwin
+              then builtins.filter (p: !(lib.hasInfix "no-sys-dirs" (toString p))) base
+              else base
+            ) ++ [ ./patches/ext-re-static-aux.patch ];
+            # darwin: pkgsStatic.perl's libperl.a rule dies "Error 127" (ranlib
+            # not found) and installperl runs install_name_tool because it tests
+            # $Config{useshrplib} (the string 'false', truthy in perl). Same two
+            # fixes unpins/perl applies for darwin: supply a real ranlib and
+            # require the value to be the string "true".
+            configureFlags = (old.configureFlags or [ ])
+              ++ lib.optionals isDarwin [ "-Dranlib=${prefix}ranlib" ];
+            postPatch = (old.postPatch or "")
+              + lib.optionalString isDarwin ''
+                substituteInPlace installperl \
+                  --replace-fail '&& $Config{useshrplib}' '&& $Config{useshrplib} eq "true"'
+              ''
+              # perl-cross has no darwin support and assumes an ELF build host
+              # (readelf/objdump); on a darwin build host (the darwin<->darwin
+              # cross) rewrite those probes to compile-only, cross-safe forms.
+              + lib.optionalString (crossCompiling && isDarwin) ''
+                ${bperl} ${./src/cross_darwin.pl}
+              '';
+            # perl-cross (the true-cross path) builds each static XS .a but its
+            # `static_modules` recipe never runs pm_to_blib, so the modules' .pm
+            # (Cwd.pm, List/Util.pm, Storable.pm, …) never reach the install tree
+            # -> `use Cwd` fails at runtime. Patch the Makefile's static rule to
+            # also stage the .pm. Native builds install them normally; no-op there.
+            postConfigure = (old.postConfigure or "")
+              + lib.optionalString crossCompiling ''
+                ${bperl} ${./src/cross_static_pm.pl} Makefile
+              '';
+          });
+          # --- platform knobs (mirror the proven spike playground/biber) ---
+          # darwin has no musl off64 hack; ld64 has no --start-group (it re-scans
+          # archives); Mach-O C symbols carry a `_` prefix; cctools has no objcopy
+          # (use llvm-objcopy). crypt.h / libcrypt / libiconv aren't on darwin's
+          # default paths but perl's recorded ccflags/ldopts reference them.
+          lfs = if isDarwin then "" else "-D_LARGEFILE64_SOURCE";
+          cryptInc = if isDarwin then "-I${lib.getDev sp.libxcrypt}/include" else "";
+          cryptLib = if isDarwin
+            then "-L${lib.getLib sp.libxcrypt}/lib -L${lib.getLib sp.libiconv}/lib -liconv"
+            else "";
+          objcopy = if isDarwin then "${pkgs.buildPackages.llvm}/bin/llvm-objcopy" else "$OBJCOPY";
+          usym = if isDarwin then "_" else "";   # Mach-O C-symbol underscore prefix
+          # darwin has no --wrap: rename libperl.a's open/stat to the VFS entry
+          # points by hand. x86_64-darwin carries the $INODE64 ABI suffix on
+          # stat/lstat; aarch64-darwin uses plain _stat/_lstat.
+          darwinRedef =
+            let suf = if host.isAarch64 or false then "" else "$INODE64";
+            in lib.concatStringsSep " " [
+              "--redefine-sym _open=_unpinvfs_open"
+              "--redefine-sym '_stat${suf}=_unpinvfs_stat'"
+              "--redefine-sym '_lstat${suf}=_unpinvfs_lstat'"
+              "--redefine-sym _access=_unpinvfs_access"
+            ];
+          # 32-bit musl is _REDIR_TIME64: libc renames stat/lstat to
+          # __stat_time64/__lstat_time64 in the headers, so a bare --wrap=stat
+          # never fires. The VFS wraps those names too (see src/vfs_miniz.c,
+          # guarded by -DUNPIN_WRAP_TIME64). Linux 32-bit only (i686/armv7l).
+          wrap32 = (host.parsed.cpu.bits or 64) == 32;
+          # When the build host can't run the target binary (ppc64le/riscv64/
+          # armv7l, windows), the codegen perl can't be the target perl. Drive
+          # the Perl-side steps (Makefile.PL, xsubpp, writemain, ldopts, Config
+          # queries) with the build-host perl pointed at the target archlib:
+          # Config_heavy.pl is plain data and both are perl 5.42.0, so MakeMaker
+          # emits a Makefile with the target cc/ccflags/CORE while codegen
+          # (Config-free) runs on the host; the C is compiled by the cross $CC.
+          # This is how nixpkgs/perl-cross cross-builds native modules.
+          crossCompiling = !(sp.stdenv.buildPlatform.canExecute host);
+          bperl = "${pkgs.buildPackages.perl}/bin/perl";
           pp = sp.perlPackages;
-          biber = pkgs.biber;
+          # The biber driver script + the @INC module trees it `use lib`s are
+          # pure-Perl / arch-independent .pm (the compiled XS we build by hand).
+          # Take them from the BUILD-host biber so cross targets don't drag the
+          # whole biber Perl closure through a (failing) cross compile. For native
+          # x86_64 buildPackages.biber IS pkgs.biber, so this is a no-op there.
+          biber = pkgs.buildPackages.biber;
 
           # The 14 pure-XS (no external C library) modules of biber's closure.
           pureXs = {
@@ -51,7 +142,7 @@
             pname = "biber";
             version = biber.version or "2.21";
             dontUnpack = true;
-            nativeBuildInputs = [ perl pkgs.zip pkgs.file ];
+            nativeBuildInputs = [ perl pkgs.buildPackages.perl pkgs.zip pkgs.file ];
             buildInputs = [ sp.libxml2 sp.libxslt ];
             PURE_XS_LIST = pureXsList;
             TEXTBIBTEX_SRC = pp.TextBibTeX.src;
@@ -63,12 +154,34 @@
 
             buildPhase = ''
               runHook preBuild
-              # off64_t/LFS64 for every external XS on static-musl perl. UNPIN_VFS_OFF
-              # keeps the VFS dormant for build-time perl runs (writemain etc.).
-              export NIX_CFLAGS_COMPILE="''${NIX_CFLAGS_COMPILE:-} -D_LARGEFILE64_SOURCE"
+              # off64_t/LFS64 for every external XS on static-musl perl (empty on
+              # darwin); +crypt.h include there. UNPIN_VFS_OFF keeps the VFS
+              # dormant for build-time perl runs (writemain etc.).
+              export NIX_CFLAGS_COMPILE="''${NIX_CFLAGS_COMPILE:-} ${lfs} ${cryptInc}"
+              export NIX_LDFLAGS="''${NIX_LDFLAGS:-} ${cryptLib}"
               export UNPIN_VFS_OFF=1
-              PERL=${perl}/bin/perl
-              ARCHLIB="$($PERL -MConfig -e 'print $Config{archlibexp}')"
+              ${if crossCompiling then ''
+                # cross: target perl can't run here. Derive its archlib by glob and
+                # drive codegen with the build-host perl pointed at the target
+                # archlib (-I "$ARCHLIB"): Config_heavy.pl is plain data, and
+                # archname-checking modules like Errno load from there and match the
+                # target %Config. The one hazard is Cwd -- it's XS and the target's
+                # is a static (-Uusedl) build whose XS can't load on the host, so
+                # Cwd::getcwd falls back to pure-perl (fine on Linux) but returns
+                # undef on a darwin build host -> MakeMaker dies "Can't figure out
+                # your cwd". Shadow ONLY Cwd with the build-host's host-runnable
+                # copy (it doesn't check archname), keeping the target archlib for
+                # everything else.
+                ARCHLIB="$(dirname "$(echo ${perl}/lib/perl5/*/*/CORE)")"
+                BARCH_B="$(${bperl} -MConfig -e 'print $Config{archlibexp}')"
+                mkdir -p "$NIX_BUILD_TOP/cwddir/auto"
+                ln -sf "$BARCH_B/Cwd.pm" "$NIX_BUILD_TOP/cwddir/"
+                ln -sf "$BARCH_B/auto/Cwd" "$NIX_BUILD_TOP/cwddir/auto/"
+                PERL="${bperl} -I$NIX_BUILD_TOP/cwddir -I$ARCHLIB"
+              '' else ''
+                PERL=${perl}/bin/perl
+                ARCHLIB="$($PERL -MConfig -e 'print $Config{archlibexp}')"
+              ''}
               PRIVLIB="$($PERL -MConfig -e 'print $Config{privlibexp}')"
               CCFLAGS="$($PERL -MConfig -e 'print $Config{ccflags}')"
               XML2_CF="-I${sp.libxml2.dev}/include/libxml2"
@@ -95,7 +208,7 @@
                   $PERL -I. Makefile.PL LINKTYPE=static >/dev/null
                   make -j$NIX_BUILD_CORES CC="$CC" LD="$CC" AR="$AR" OPTIMIZE="-O2" static pm_to_blib >/dev/null )
               done
-              $OBJCOPY --weaken-symbol=PerlIOBase_flush_linebuf \
+              ${objcopy} --weaken-symbol=${usym}PerlIOBase_flush_linebuf \
                 pure/PerlIOutf8_strict/blib/arch/auto/PerlIO/utf8_strict/utf8_strict.a
               ALLA="$ALLA $(find pure -path '*/blib/arch/auto/*.a' | tr '\n' ' ')"
               EXTS="$EXTS $(find pure -path '*/blib/arch/auto/*.a' | sed -E 's|.*/blib/arch/auto/||; s|/[^/]*\.a$||' | sort -u | tr '\n' ' ')"
@@ -168,7 +281,7 @@
               ALLA="$ALLA params/PV_XS.a"; EXTS="$EXTS Params/Validate/XS"
 
               # ===== VFS objects + the @INC blob =====
-              $CC -O2 -I${./src} -c ${./src/vfs_miniz.c} -o vfs.o
+              $CC -O2 ${lib.optionalString wrap32 "-DUNPIN_WRAP_TIME64"} -I${./src} -c ${./src/vfs_miniz.c} -o vfs.o
               $CC -O2 -I${./src} -c ${./src/miniz.c} -o miniz.o
               $CC -O2 -c ${./src/dispatch.c} -o dispatch.o
 
@@ -179,6 +292,14 @@
               mkdir -p stage/inc stage/bin
               PERLVER="$($PERL -MConfig -e 'print $Config{version}')"
               ARCHB="$(basename "$ARCHLIB")"
+              # The biber module trees are staged from the BUILD-host biber, so an
+              # XS module's .pm sits under that tree's arch dir (e.g.
+              # site_perl/5.42.0/x86_64-linux-thread-multi/DateTime.pm). @INC must
+              # therefore search the BUILD-host archname for these trees, not the
+              # target's -- on a true cross they differ (riscv64-linux vs
+              # x86_64-linux-thread-multi) and the .pm would be orphaned. For
+              # native builds the two coincide, so this is unchanged there.
+              BARCHB="$(${bperl} -MConfig -e 'print $Config{archname}')"
               i=0; INCEXPR=""
               for p in $($PERL -ne 'if(/^use lib (.*);\s*$/){my$l=$1;while($l=~/"([^"]+)"/g){print "$1\n"}}' ${biber}/bin/biber); do
                 d=$(printf '%03d' $i)
@@ -188,7 +309,7 @@
                 # installs modules under site_perl/<version>/...). We pin @INC by
                 # assignment (not `use lib`), so add those subdirs explicitly --
                 # checking the real source tree at build time (VFS has no readdir).
-                for sub in "" "/$ARCHB" "/$PERLVER" "/$PERLVER/$ARCHB"; do
+                for sub in "" "/$BARCHB" "/$PERLVER" "/$PERLVER/$BARCHB"; do
                   [ -d "$p$sub" ] && INCEXPR="$INCEXPR\"/zip/inc/$d$sub\","
                 done
                 i=$((i+1))
@@ -199,6 +320,19 @@
               mkdir -p stage/inc/perl
               cp -r "$PRIVLIB"/. stage/inc/perl/
               ARCHB=$(basename "$ARCHLIB")
+              ${lib.optionalString crossCompiling ''
+                # perl-cross's -Uusedl build omits a few core .pm that the static
+                # boot makes redundant (DynaLoader.pm) -- but modules still
+                # `require DynaLoader`. The build-host perl (same 5.42.0) has them;
+                # fill any gaps into the staged target arch dir, no-clobber so the
+                # target's own arch-specific files (Config*) win. The dev leftovers
+                # this drags in (auto/, CORE/, *.a/.h) are scrubbed just below.
+                BARCH="$(${bperl} -MConfig -e 'print $Config{archlibexp}')"
+                # the privlib copy above came from the read-only nix store, so make
+                # the target arch dir writable before filling into it.
+                chmod -R u+w "stage/inc/perl/$ARCHB"
+                cp -rn "$BARCH"/. "stage/inc/perl/$ARCHB"/ 2>/dev/null || true
+              ''}
               INCEXPR="$INCEXPR\"/zip/inc/perl\",\"/zip/inc/perl/$ARCHB\""
               chmod -R u+w stage
               # drop dev/compile leftovers (the XS .so/.a/.h/CORE; we link XS static)
@@ -218,20 +352,43 @@
 
               ( cd stage && zip -9 -X -r -q ../incblob inc bin )
               [ -f incblob ] || mv incblob.zip incblob
-              cp ${./src/blob.S} blob.S
+              cp ${if isDarwin then ./src/blob_darwin.S else ./src/blob.S} blob.S
               $CC -c blob.S -o incblob.o
 
               # ===== relink: perl + 19 XS static-ext + VFS + blob + dispatch =====
               COREEXTS="$(cd "$ARCHLIB/auto" && find . -name '*.a' \
                 | sed -e 's|^\./||' -e 's|/[^/]*\.a$||' | sort -u | tr '\n' ' ')"
+              # The full set of core static-ext archives. writemain emits a
+              # boot_<ext> for each name above, so EVERY matching .a must be on
+              # the link line. ExtUtils::Embed ldopts can't be trusted to supply
+              # them: it maps $Config{static_ext} -> auto/<ext>/<base>.a, but
+              # perl-cross records dist names (PathTools, Scalar/List/Utils) that
+              # don't match the on-disk archives (auto/Cwd/Cwd.a, auto/List/Util.a),
+              # so cross-ldopts silently drops Cwd/List::Util -> undefined boot_*.
+              # Link the archives explicitly; keep $LDO only for syslibs/extralibs.
+              COREA="$(find "$ARCHLIB/auto" -name '*.a' | tr '\n' ' ')"
               $PERL -MExtUtils::Miniperl -e 'writemain(@ARGV)' $COREEXTS $EXTS > perlmain.c
               $CC -O2 -c perlmain.c -I"$ARCHLIB/CORE" -o perlmain.o
               LDO="$($PERL -MExtUtils::Embed -e ldopts 2>/dev/null | sed 's/-lperl//')"
-              $CC -O2 -o biber \
-                -Wl,--wrap=open -Wl,--wrap=stat -Wl,--wrap=lstat -Wl,--wrap=access -Wl,--wrap=main \
-                perlmain.o vfs.o miniz.o dispatch.o incblob.o \
-                -Wl,--start-group $ALLA "$EXSLT_A" "$XSLT_A" "$XML2_A" \
-                $LDO "$ARCHLIB/CORE/libperl.a" -Wl,--end-group -lm
+              ${if isDarwin then ''
+                # darwin: no --wrap. dispatch.o supplies _main (rename perlmain.o's
+                # _main -> _real_main); libperl.a's open/stat are renamed to the VFS
+                # entry points. ld64 re-scans archives, so no --start-group.
+                ${objcopy} --redefine-sym _main=_real_main perlmain.o
+                cp "$ARCHLIB/CORE/libperl.a" libperl_vfs.a; chmod u+w libperl_vfs.a
+                ${objcopy} ${darwinRedef} libperl_vfs.a
+                $CC -O2 -o biber \
+                  perlmain.o vfs.o miniz.o dispatch.o incblob.o \
+                  $ALLA $COREA "$EXSLT_A" "$XSLT_A" "$XML2_A" \
+                  $LDO libperl_vfs.a -lm
+              '' else ''
+                $CC -O2 -o biber \
+                  -Wl,--wrap=open -Wl,--wrap=stat -Wl,--wrap=lstat -Wl,--wrap=access -Wl,--wrap=main \
+                  ${lib.optionalString wrap32 "-Wl,--wrap=__stat_time64 -Wl,--wrap=__lstat_time64"} \
+                  perlmain.o vfs.o miniz.o dispatch.o incblob.o \
+                  -Wl,--start-group $ALLA $COREA "$EXSLT_A" "$XSLT_A" "$XML2_A" \
+                  $LDO "$ARCHLIB/CORE/libperl.a" -Wl,--end-group -lm
+              ''}
               runHook postBuild
             '';
             installPhase = ''
@@ -248,25 +405,18 @@
         embedMan = true;
         smoke = [ "--version" ];
         smokePattern = "biber";
-        # darwin + windows are proven in the spike but their VFS-embed is not
-        # wired here yet; ship Linux first.
-        linuxOnly = true;
         build = pkgs: mk pkgs;
       };
     in
-    # mkStandaloneFlake also emits the cross linux targets (linux-i686/ppc64le/
-    # riscv64/armv7l). The recipe runs the *target* perl for codegen, which only
-    # works where the build host can execute it -- the two NATIVE arches
-    # (x86_64 + aarch64-via-arm-runner). The cross targets need the perl-cross
-    # codegen flow (build-host perl + target toolchain), not yet wired. Drop them
-    # from `packages` so action-build's auto-discovered matrix builds only what
-    # works; native x86_64 and aarch64 ship now.
+    # Ship: x86_64/aarch64-linux (native) + the four cross-linux arches
+    # (i686/ppc64le/riscv64/armv7l, via the build-host-perl codegen flow) +
+    # x86_64/aarch64-darwin (native). Drop only mkStandaloneFlake's
+    # `aarch64-darwin."darwin-x86_64"` cross attr: it's redundant with the
+    # x86_64-darwin native build and would add an untested cross direction.
     base // {
       packages = base.packages // {
-        x86_64-linux = builtins.removeAttrs (base.packages.x86_64-linux or { })
-          [ "linux-i686" "linux-ppc64le" "linux-riscv64" ];
-        aarch64-linux = builtins.removeAttrs (base.packages.aarch64-linux or { })
-          [ "linux-armv7l" ];
+        aarch64-darwin = builtins.removeAttrs (base.packages.aarch64-darwin or { })
+          [ "darwin-x86_64" ];
       };
     };
 }

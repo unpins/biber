@@ -4,6 +4,7 @@ Standalone build of [biber](https://github.com/plk/biber) — the backend proces
 
 [![CI](https://github.com/unpins/biber/actions/workflows/biber.yml/badge.svg)](https://github.com/unpins/biber/actions)
 ![Linux](https://img.shields.io/badge/Linux-✓-success?logo=linux&logoColor=white)
+![macOS](https://img.shields.io/badge/macOS-✓-success?logo=apple&logoColor=white)
 
 Part of the [unpins](https://unpins.org) project — native single-binary builds with no third-party runtime dependencies.
 
@@ -52,7 +53,7 @@ single static binary has no dynamic loader, so each XS module is linked in as a
 **static extension** instead of loaded as a `.so` at runtime. The whole module
 tree (the pure-Perl dependencies, the XS modules' `.pm`, and biber's own library)
 is packed into the executable as a ZIP and served by a linker-level VFS — `open`/
-`stat` are intercepted (`-Wl,--wrap`) so `@INC` reads straight from the embedded
+`stat` are intercepted at link time so `@INC` reads straight from the embedded
 blob, with no companion module tree on disk.
 
 - The four XS modules that carry an external C library are folded in statically
