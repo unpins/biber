@@ -5,6 +5,7 @@ Standalone build of [biber](https://github.com/plk/biber) — the backend proces
 [![CI](https://github.com/unpins/biber/actions/workflows/biber.yml/badge.svg)](https://github.com/unpins/biber/actions)
 ![Linux](https://img.shields.io/badge/Linux-✓-success?logo=linux&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-✓-success?logo=apple&logoColor=white)
+![Windows](https://img.shields.io/badge/Windows-✓-success?logo=windows&logoColor=white)
 
 Part of the [unpins](https://unpins.org) project — native single-binary builds with no third-party runtime dependencies.
 

@@ -406,6 +406,12 @@
         smoke = [ "--version" ];
         smokePattern = "biber";
         build = pkgs: mk pkgs;
+        # Windows is mingw-NATIVE (not cosmo): nixpkgs' perl-cross only gets
+        # part-way, so windows.nix runs winfix-spike.sh (postConfigure) to make a
+        # real win32 perl, folds the 19 XS as static extensions, and relinks with
+        # the four win32_* I/O wraps + main wrap serving the embedded @INC ZIP.
+        # Lands as packages.x86_64-linux."windows-x86_64".
+        windowsBuild = import ./windows.nix { inherit ulib; };
       };
     in
     # Ship: x86_64/aarch64-linux (native) + the four cross-linux arches
