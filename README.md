@@ -1,13 +1,13 @@
 # biber
 
-Standalone build of [biber](https://github.com/plk/biber) — the backend processor for [biblatex](https://ctan.org/pkg/biblatex).
+[biber](https://github.com/plk/biber) — the backend processor for [biblatex](https://ctan.org/pkg/biblatex). A single self-contained binary, built natively for Linux, macOS, and Windows.
 
 [![CI](https://github.com/unpins/biber/actions/workflows/biber.yml/badge.svg)](https://github.com/unpins/biber/actions)
 ![Linux](https://img.shields.io/badge/Linux-✓-success?logo=linux&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-✓-success?logo=apple&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows-✓-success?logo=windows&logoColor=white)
 
-Part of the [unpins](https://unpins.org) project — native single-binary builds with no third-party runtime dependencies.
+Part of the [unpins](https://unpins.org) catalog; install it with [`unpin`](https://github.com/unpins/unpin): `unpin install biber`.
 
 ## Usage
 
@@ -23,6 +23,10 @@ To install it onto your PATH:
 ```bash
 unpin install biber
 ```
+
+## Man pages
+
+`biber.1` is embedded in the binary — read it with `unpin man biber`.
 
 ## Build locally
 
@@ -42,10 +46,6 @@ The first invocation will offer to add the [unpins.cachix.org](https://unpins.ca
 ## Manual download
 
 The [Releases](https://github.com/unpins/biber/releases) page has standalone binaries for manual download.
-
-## Man pages
-
-`biber.1` is embedded in the binary — read it with `unpin man biber`.
 
 ## Build notes
 
