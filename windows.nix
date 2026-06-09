@@ -284,8 +284,8 @@ cross.stdenv.mkDerivation {
       $AR cr PV_XS.a PV_XS.o )
     ALLA="$ALLA params/PV_XS.a"; EXTS="$EXTS Params/Validate/XS"
 
-    # ===== VFS objects + dispatch + the @INC blob =====
-    $CC -O2 -std=gnu17 -I${./src} -c ${./src/vfs_miniz.c} -o vfs.o
+    # ===== VFS objects + dispatch + the @INC blob (shared unpin-vfs core) =====
+    $CC -O2 -std=gnu17 -I${./src} -c ${./src/vfs.c} -o vfs.o
     $CC -O2 -std=gnu17 -I${./src} -c ${./src/miniz.c} -o miniz.o
     $CC -O2 -std=gnu17 -c ${./src/dispatch.c} -o dispatch.o
 

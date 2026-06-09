@@ -107,7 +107,7 @@
             ];
           # 32-bit musl is _REDIR_TIME64: libc renames stat/lstat to
           # __stat_time64/__lstat_time64 in the headers, so a bare --wrap=stat
-          # never fires. The VFS wraps those names too (see src/vfs_miniz.c,
+          # never fires. The VFS wraps those names too (see src/vfs.c,
           # guarded by -DUNPIN_WRAP_TIME64). Linux 32-bit only (i686/armv7l).
           wrap32 = (host.parsed.cpu.bits or 64) == 32;
           # When the build host can't run the target binary (ppc64le/riscv64/
@@ -280,8 +280,9 @@
                 $AR cr PV_XS.a PV_XS.o )
               ALLA="$ALLA params/PV_XS.a"; EXTS="$EXTS Params/Validate/XS"
 
-              # ===== VFS objects + the @INC blob =====
-              $CC -O2 ${lib.optionalString wrap32 "-DUNPIN_WRAP_TIME64"} -I${./src} -c ${./src/vfs_miniz.c} -o vfs.o
+              # ===== VFS objects + the @INC blob (shared unpin-vfs core:
+              # src/vfs.c + src/miniz.c, github:unpins/unpin-vfs, deflate path) =====
+              $CC -O2 ${lib.optionalString wrap32 "-DUNPIN_WRAP_TIME64"} -I${./src} -c ${./src/vfs.c} -o vfs.o
               $CC -O2 -I${./src} -c ${./src/miniz.c} -o miniz.o
               $CC -O2 -c ${./src/dispatch.c} -o dispatch.o
 

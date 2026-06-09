@@ -4,7 +4,7 @@
  * binary IS biber, so we intercept main and inject the embedded biber driver as
  * that script before perl sees argv:
  *     [argv[0], "/zip/bin/biber", original args...]
- * /zip/bin/biber is served from the blob by the @INC VFS (vfs_miniz.c) -- no
+ * /zip/bin/biber is served from the blob by the @INC VFS (vfs.c) -- no
  * script on disk. Unlike perl's multicall dispatch.c there is no applet list:
  * biber is the only program, so every invocation runs it.
  *
