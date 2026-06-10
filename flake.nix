@@ -128,6 +128,25 @@
           # x86_64 buildPackages.biber IS pkgs.biber, so this is a no-op there.
           biber = pkgs.buildPackages.biber;
 
+          # build-time tool: packs the staged @INC tree into a zstd-in-zip blob
+          # (ZIP method 93). Build-host native (the blob is arch-independent), so
+          # it links the system libzstd to COMPRESS; the shipped binary never does
+          # (it decodes with the vendored decompress-only zstddeclib.c).
+          packTool = pkgs.buildPackages.stdenv.mkDerivation {
+            name = "unpin-vfs-pack";
+            dontUnpack = true;
+            buildInputs = [ pkgs.buildPackages.zstd ];
+            buildPhase = ''
+              # -DMINIZ_NO_TIME: the zip writer otherwise stamps each entry with
+              # time(NULL) (current wall clock) -> non-reproducible blob. With it,
+              # timestamps are fixed (0), so the packed blob is byte-deterministic.
+              $CC -O2 -DMINIZ_USE_ZSTD -DMINIZ_NO_TIME -I${./src} \
+                ${./src/unpin-vfs-pack.c} ${./src/miniz.c} ${./src/unpin_zstd.c} \
+                -o unpin-vfs-pack -lzstd
+            '';
+            installPhase = ''mkdir -p $out/bin; cp unpin-vfs-pack $out/bin/'';
+          };
+
           # The 14 pure-XS (no external C library) modules of biber's closure.
           pureXs = {
             inherit (pp) DateSimple Clone EncodeHanExtra ReadonlyXS EncodeEUCJPASCII
@@ -142,7 +161,7 @@
             pname = "biber";
             version = biber.version or "2.21";
             dontUnpack = true;
-            nativeBuildInputs = [ perl pkgs.buildPackages.perl pkgs.zip pkgs.file ];
+            nativeBuildInputs = [ perl pkgs.buildPackages.perl packTool pkgs.buildPackages.zstd pkgs.file ];
             buildInputs = [ sp.libxml2 sp.libxslt ];
             PURE_XS_LIST = pureXsList;
             TEXTBIBTEX_SRC = pp.TextBibTeX.src;
@@ -281,9 +300,10 @@
               ALLA="$ALLA params/PV_XS.a"; EXTS="$EXTS Params/Validate/XS"
 
               # ===== VFS objects + the @INC blob (shared unpin-vfs core:
-              # src/vfs.c + src/miniz.c, github:unpins/unpin-vfs, deflate path) =====
-              $CC -O2 ${lib.optionalString wrap32 "-DUNPIN_WRAP_TIME64"} -I${./src} -c ${./src/vfs.c} -o vfs.o
-              $CC -O2 -I${./src} -c ${./src/miniz.c} -o miniz.o
+              # src/vfs.c + src/miniz.c, github:unpins/unpin-vfs, zstd path) =====
+              $CC -O2 -DMINIZ_USE_ZSTD ${lib.optionalString wrap32 "-DUNPIN_WRAP_TIME64"} -I${./src} -c ${./src/vfs.c} -o vfs.o
+              $CC -O2 -DMINIZ_USE_ZSTD -I${./src} -c ${./src/miniz.c} -o miniz.o
+              $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I${./src} -c ${./src/unpin_zstd.c} -o unpin_zstd.o
               $CC -O2 -c ${./src/dispatch.c} -o dispatch.o
 
               # Stage the @INC: every `use lib` tree from the nixpkgs biber driver
@@ -304,7 +324,7 @@
               i=0; INCEXPR=""
               for p in $($PERL -ne 'if(/^use lib (.*);\s*$/){my$l=$1;while($l=~/"([^"]+)"/g){print "$1\n"}}' ${biber}/bin/biber); do
                 d=$(printf '%03d' $i)
-                mkdir -p "stage/inc/$d"; cp -r "$p"/. "stage/inc/$d"/ 2>/dev/null || true
+                mkdir -p "stage/inc/$d"; cp -rL "$p"/. "stage/inc/$d"/ 2>/dev/null || true
                 # Mirror perl's lib.pm: a `use lib X` also searches X/<version>,
                 # X/<archname> and X/<version>/<archname> when present (MakeMaker
                 # installs modules under site_perl/<version>/...). We pin @INC by
@@ -319,7 +339,7 @@
               # subdir, so one copy carries both; add BOTH to @INC (arch-specific
               # core .pm like Cwd/Config live under the <arch> subdir).
               mkdir -p stage/inc/perl
-              cp -r "$PRIVLIB"/. stage/inc/perl/
+              cp -rL "$PRIVLIB"/. stage/inc/perl/
               ARCHB=$(basename "$ARCHLIB")
               ${lib.optionalString crossCompiling ''
                 # perl-cross's -Uusedl build omits a few core .pm that the static
@@ -339,10 +359,6 @@
               # drop dev/compile leftovers (the XS .so/.a/.h/CORE; we link XS static)
               find stage/inc -type f \( -name '*.so' -o -name '*.a' -o -name '*.h' -o -name '*.ld' -o -path '*/CORE/*' \) -delete
               find stage/inc -depth -type d -empty -delete 2>/dev/null || true
-              # scrub /nix store paths out of Config (the only files that leak them)
-              find stage/inc -name 'Config_heavy.pl' -o -name 'Config.pm' | while read -r f; do
-                sed -i -E "s#/nix/store/[a-z0-9]{32}-[^ '\":]*#/unpin#g" "$f"
-              done
               # /zip/bin/biber = the driver with shebang+original `use lib` dropped
               # and @INC pinned to the staged /zip trees.
               {
@@ -351,8 +367,20 @@
                 tail -n +3 ${biber}/bin/biber
               } > stage/bin/biber
 
-              ( cd stage && zip -9 -X -r -q ../incblob inc bin )
-              [ -f incblob ] || mv incblob.zip incblob
+              # Scrub /nix store paths out of EVERY staged text file. The deflate
+              # blob hid them (compressed), but the STORED shared dict is trained on
+              # this payload and would bake store-path hashes verbatim -- nix would
+              # then retain biber's whole module closure as spurious references.
+              grep -rlI '/nix/store/' stage 2>/dev/null | while read -r f; do
+                sed -i -E "s#/nix/store/[a-z0-9]{32}-[^ '\":]*#/unpin#g" "$f"
+              done
+
+              # Train a shared zstd dictionary over the staged @INC payload (stable
+              # file order => reproducible; zstd --train is deterministic for a
+              # fixed input). Pack every entry against it; the dict ships as the
+              # STORED ".unpin/zdict" entry, auto-loaded by the VFS at init.
+              ( cd stage && zstd -q -f --train $(find . -type f | LC_ALL=C sort) -o ../zdict --maxdict=112640 )
+              ( cd stage && unpin-vfs-pack ../incblob . --dict ../zdict )
               cp ${if isDarwin then ./src/blob_darwin.S else ./src/blob.S} blob.S
               $CC -c blob.S -o incblob.o
 
@@ -379,14 +407,14 @@
                 cp "$ARCHLIB/CORE/libperl.a" libperl_vfs.a; chmod u+w libperl_vfs.a
                 ${objcopy} ${darwinRedef} libperl_vfs.a
                 $CC -O2 -o biber \
-                  perlmain.o vfs.o miniz.o dispatch.o incblob.o \
+                  perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o incblob.o \
                   $ALLA $COREA "$EXSLT_A" "$XSLT_A" "$XML2_A" \
                   $LDO libperl_vfs.a -lm
               '' else ''
                 $CC -O2 -o biber \
                   -Wl,--wrap=open -Wl,--wrap=stat -Wl,--wrap=lstat -Wl,--wrap=access -Wl,--wrap=main \
                   ${lib.optionalString wrap32 "-Wl,--wrap=__stat_time64 -Wl,--wrap=__lstat_time64"} \
-                  perlmain.o vfs.o miniz.o dispatch.o incblob.o \
+                  perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o incblob.o \
                   -Wl,--start-group $ALLA $COREA "$EXSLT_A" "$XSLT_A" "$XML2_A" \
                   $LDO "$ARCHLIB/CORE/libperl.a" -Wl,--end-group -lm
               ''}
