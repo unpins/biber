@@ -445,13 +445,10 @@
     in
     # Ship: x86_64/aarch64-linux (native) + the four cross-linux arches
     # (i686/ppc64le/riscv64/armv7l, via the build-host-perl codegen flow) +
-    # x86_64/aarch64-darwin (native). Drop only mkStandaloneFlake's
-    # `aarch64-darwin."darwin-x86_64"` cross attr: it's redundant with the
-    # x86_64-darwin native build and would add an untested cross direction.
-    base // {
-      packages = base.packages // {
-        aarch64-darwin = builtins.removeAttrs (base.packages.aarch64-darwin or { })
-          [ "darwin-x86_64" ];
-      };
-    };
+    # aarch64-darwin (native) + `darwin-x86_64` (the darwin<->darwin cross,
+    # which this flake already supports — cross_darwin.pl, the $INODE64
+    # redefs). CI has no x86_64-darwin runner, so that cross attr is the
+    # ONLY path to an Intel macOS release asset; the native x86_64-darwin
+    # output only ever builds locally.
+    base;
 }
