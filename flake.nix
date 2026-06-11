@@ -408,11 +408,15 @@
         # ONE withUnpinEmbed call: the @INC tree staged in buildPhase becomes
         # the runtime stage (absolute path — postFixup's cwd is wherever the
         # last phase left it), packed into the binary's single EOF ZIP together
-        # with the man pages (man = true harvests the drv's own share/man;
-        # biberBin ships none, so that part skips — same outcome embedMan had).
+        # with the man page. biberBin is a hand-rolled relink that ships no
+        # share/man of its own, so `manFallback` borrows the version-locked
+        # biber.1 from the build-host biber (POD-generated, OS-independent roff)
+        # — the same graft windows.nix applies. The passthru flag this sets makes
+        # mkStandaloneFlake skip its own withMan pass.
         ulib.withUnpinEmbed pkgs {
           primary = "biber";
           man = true;
+          manFallback = "${biber.man or biber}";
           runtimeStage = ''
             cp -a "$NIX_BUILD_TOP/work/stage/." "$__unpin_stage/"
           '';
