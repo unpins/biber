@@ -53,9 +53,9 @@ biber is a Perl program built from ~100 modules, ~20 of them compiled (XS). A
 single static binary has no dynamic loader, so each XS module is linked in as a
 **static extension** instead of loaded as a `.so` at runtime. The whole module
 tree (the pure-Perl dependencies, the XS modules' `.pm`, and biber's own library)
-is packed into the executable as a ZIP and served by a linker-level VFS — `open`/
-`stat` are intercepted at link time so `@INC` reads straight from the embedded
-blob, with no companion module tree on disk.
+is packed into the executable's embedded ZIP and served by a linker-level VFS —
+`open`/`stat` are intercepted at link time so `@INC` reads straight out of the
+running binary, with no companion module tree on disk.
 
 - The four XS modules that carry an external C library are folded in statically
   too: `Text::BibTeX` (bundled btparse), `Unicode::LineBreak` (bundled sombok),

@@ -1,11 +1,21 @@
 /* unpin-vfs -- a single-binary virtual filesystem served from an embedded ZIP.
  *
  * One reusable core behind every unpin single-binary that embeds a runtime tree
- * (perl/biber @INC, python stdlib, tcc sysroot, vim runtime, ...). The tree is a
- * ZIP blob compiled into the executable; a matched path under UNPIN_VFS_ROOT is
+ * (perl/biber @INC, python stdlib, tcc sysroot, vim runtime, ...). The tree is
+ * a ZIP carried by the executable; a matched path under UNPIN_VFS_ROOT is
  * inflated on demand and handed to the program as a real, seekable fd. Misses
  * under the root are ENOENT (a reserved mount, never the host FS); everything
  * else falls through to libc untouched.
+ *
+ * Two ways the executable carries the ZIP:
+ *   - blob (default): compiled in as a section (.incbin via blob.S), exposed
+ *     through <sym>_{start,end} labels.
+ *   - self-EOF (-DUNPIN_VFS_SELF): the single metadata/runtime ZIP appended to
+ *     the binary by the nix build (docs/embedded-metadata.md — absolute,
+ *     file-adjusted offsets). init locates the running executable, opens it
+ *     read-only and serves entries straight from the file; the `unpin/` and
+ *     `.unpin/` namespaces belong to unpin's metadata reader and are hidden
+ *     from VFS lookups (the shared zstd dict is still auto-loaded).
  *
  * Container: a structurally standard .zip. Entries may be DEFLATE (method 8) or,
  * when built with -DMINIZ_USE_ZSTD, Zstandard (method 93) -- see README. An
@@ -20,6 +30,8 @@
  *
  * Build-time knobs (all optional):
  *   UNPIN_VFS_ROOT      mount prefix, default "/zip/"
+ *   UNPIN_VFS_SELF      read the ZIP from the running executable's EOF instead
+ *                       of a compiled-in blob (no blob.S, no *_start/_end syms)
  *   UNPIN_VFS_BLOB_SYM  blob symbol base name (bare identifier), default incblob
  *   MINIZ_USE_ZSTD      accept method-93 (zstd) entries + dict auto-load
  *   UNPIN_WRAP_TIME64   also wrap __stat_time64/__lstat_time64 (32-bit musl)
@@ -34,9 +46,10 @@
 #define UNPIN_VFS_ROOT "/zip/"
 #endif
 
-/* Initialise the reader from the embedded blob and auto-load the shared dict if
- * present. Idempotent; called lazily by the shims, so consumers normally never
- * call it. Returns 1 on success, 0 if the blob is unusable. */
+/* Initialise the reader from the embedded ZIP (blob section or self-EOF, see
+ * above) and auto-load the shared dict if present. Idempotent; called lazily by
+ * the shims, so consumers normally never call it. Returns 1 on success, 0 if
+ * the ZIP is unusable (or, in self-EOF mode, absent). */
 int unpin_vfs_init(void);
 
 /* 1 if `path` is under UNPIN_VFS_ROOT (a path the VFS owns), else 0. */

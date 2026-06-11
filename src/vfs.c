@@ -30,6 +30,75 @@
 #include "unpin_zstd.h"
 #endif
 
+#ifdef UNPIN_VFS_SELF
+/* Self-EOF mode: the ZIP is the single metadata/runtime container the nix
+ * build appends to the executable (one ZIP per binary, ABSOLUTE file-adjusted
+ * offsets — the sfx convention, docs/embedded-metadata.md). miniz finds the
+ * EOCD by scanning back from EOF, and absolute offsets mean the whole file IS
+ * the archive: no base adjustment, no blob symbols, no relink to change data.
+ *
+ * The file handle stays open for the process lifetime; extraction seeks+reads
+ * it on demand (these consumers' VFS paths are single-threaded, like the rest
+ * of this reader). Reading our own image is fine everywhere: Linux via
+ * /proc/self/exe (works even unlinked), macOS via _NSGetExecutablePath, and
+ * Windows loaders open images with FILE_SHARE_READ, so a read-only CRT open
+ * succeeds while running. */
+#if defined(_WIN32)
+#include <windows.h>
+static FILE *self_open(mz_uint64 *size) {
+    /* Wide-char API + _wfopen so a unicode install path survives (miniz's
+     * mz_zip_reader_init_file would route through the ANSI fopen). */
+    static wchar_t p[4096];
+    DWORD n = GetModuleFileNameW(NULL, p, (DWORD)(sizeof p / sizeof p[0]));
+    if (n == 0 || n >= sizeof p / sizeof p[0]) return NULL;
+    FILE *f = _wfopen(p, L"rb");
+    if (!f) return NULL;
+    if (_fseeki64(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long long sz = _ftelli64(f);
+    /* Rewind: mz_zip_reader_init_cfile treats the CURRENT file position as
+     * the archive start (m_file_archive_start_ofs), and ours is offset 0. */
+    if (sz <= 0 || _fseeki64(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    *size = (mz_uint64)sz;
+    return f;
+}
+#else
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+static FILE *self_open(mz_uint64 *size) {
+#if defined(__APPLE__)
+    char p[4096];
+    uint32_t n = sizeof p;
+    if (_NSGetExecutablePath(p, &n) != 0) return NULL;
+    FILE *f = fopen(p, "rb");
+#else
+    FILE *f = fopen("/proc/self/exe", "rb");
+#endif
+    if (!f) return NULL;
+    if (fseeko(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    off_t sz = ftello(f);
+    /* Rewind: mz_zip_reader_init_cfile treats the CURRENT file position as
+     * the archive start (m_file_archive_start_ofs), and ours is offset 0. */
+    if (sz <= 0 || fseeko(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    *size = (mz_uint64)sz;
+    return f;
+}
+#endif
+
+/* The `unpin/` and `.unpin/` namespaces of the shared container belong to
+ * unpin's metadata reader (aliases, man); hide them from VFS lookups and
+ * listings so the mount only ever shows the runtime tree. (The shared zstd
+ * dict ".unpin/zdict" is still loaded at init — by exact name, not through
+ * the lookup path.) */
+static int vfs_hidden(const char *key) {
+    if (key[0] == '.') key++;
+    /* Case-insensitive: miniz's locate_file is case-insensitive by default
+     * (flags 0), so "UNPIN/aliases" would otherwise reach the metadata. */
+    for (const char *m = "unpin"; *m; m++, key++)
+        if ((*key | 0x20) != *m) return 0;
+    return *key == '/' || *key == '\0';
+}
+#else /* blob mode */
 /* Blob symbols produced by blob.S (`.incbin`). Linux uses the objcopy-style
  * _binary_<name>_{start,end}; macOS/Windows assemblers emit the bare
  * <name>_{start,end}. <name> defaults to "incblob"; override with
@@ -51,6 +120,10 @@ extern const unsigned char UVFS_CAT(_binary_, UVFS_CAT(UNPIN_VFS_BLOB_SYM, _end)
 #  define BLOB_END UVFS_CAT(_binary_, UVFS_CAT(UNPIN_VFS_BLOB_SYM, _end))
 #endif
 
+/* A private blob never carries the unpin metadata namespaces. */
+#define vfs_hidden(key) 0
+#endif /* UNPIN_VFS_SELF */
+
 #define VFS_ROOT     UNPIN_VFS_ROOT
 #define VFS_ROOT_LEN (sizeof(VFS_ROOT) - 1)
 #define ZDICT_ENTRY  ".unpin/zdict"
@@ -69,8 +142,16 @@ static int vfs_off(void) {
 int unpin_vfs_init(void) {
     if (g_state) return g_state == 1;
     memset(&g_zip, 0, sizeof g_zip);
+#ifdef UNPIN_VFS_SELF
+    mz_uint64 self_size = 0;
+    FILE *self = self_open(&self_size);
+    g_state = (self && mz_zip_reader_init_cfile(&g_zip, self, self_size, 0)) ? 1 : 2;
+    if (g_state != 1 && self) fclose(self);
+    /* On success `self` is owned by g_zip for the process lifetime. */
+#else
     size_t size = (size_t)(BLOB_END - BLOB_BEG);
     g_state = mz_zip_reader_init_mem(&g_zip, BLOB_BEG, size, 0) ? 1 : 2;
+#endif
 #ifdef MINIZ_USE_ZSTD
     if (g_state == 1) {
         /* Auto-load the shared dictionary: it is STORED, so it reads without
@@ -88,6 +169,7 @@ int unpin_vfs_init(void) {
 
 /* zip lookup by /zip-stripped, forward-slash key. Returns file index or -1. */
 static int vfs_find(const char *key) {
+    if (vfs_hidden(key)) return -1;
     if (!unpin_vfs_init()) return -1;
     return mz_zip_reader_locate_file(&g_zip, key, NULL, 0);
 }
@@ -509,6 +591,7 @@ static int vfs_open_virtual(const char *key) {
 }
 static int vfs_stat_virtual(const char *key, struct stat *st) {
 #ifdef UNPIN_VFS_DIRS
+    if (vfs_hidden(key)) { errno = ENOENT; return -1; }
     if (!unpin_vfs_init()) { errno = EIO; return -1; }  /* find_entry needs g_zip */
     int i = find_entry(key);
     if (i >= 0) {
@@ -590,6 +673,7 @@ DIR *OPENDIR_FN(const char *path) {
     if (kl >= sizeof keybuf) { errno = ENAMETOOLONG; return NULL; }
     memcpy(keybuf, key, kl);
     keybuf[kl] = '\0';
+    if (vfs_hidden(keybuf)) { errno = ENOENT; return NULL; }
 
     int idx = find_entry(keybuf);
     int is_dir = (idx >= 0 && mz_zip_reader_is_file_a_directory(&g_zip, (mz_uint)idx));
@@ -613,7 +697,8 @@ struct dirent *READDIR_FN(DIR *dir) {
     while (d->cursor < n) {
         mz_uint i = d->cursor++;
         mz_uint fl = mz_zip_reader_get_filename(&g_zip, i, name, sizeof name);
-        if (fl <= d->prefix_len + 1) continue;
+        if (fl <= d->prefix_len + 1) continue;  /* fl counts the NUL: skips name <= prefix */
+        if (vfs_hidden(name)) continue;  /* keep the unpin namespaces unlisted */
 
         /* Children of the mount root (prefix_len == 0) have no leading
          * separator to strip; deeper dirs match "<prefix>/" then the child. */

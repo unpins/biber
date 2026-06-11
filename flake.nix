@@ -15,9 +15,11 @@
   # linked into the interpreter (the same mechanism perl's own core XS use:
   # ExtUtils::Miniperl::writemain regenerates perlmain.c, the .a's are folded in).
   # The whole @INC (pure-Perl deps + the XS modules' .pm + biber's own lib) is
-  # packed into the executable as a ZIP and served by a linker-level VFS: open/
-  # stat are intercepted (Linux `-Wl,--wrap`) and any `/zip/...` path is read
-  # from the embedded blob, so there is no companion module tree on disk. The
+  # packed into the executable's single EOF ZIP (withUnpinEmbed; zstd method 93,
+  # shared dict) and served by a linker-level VFS: open/stat are intercepted
+  # (Linux `-Wl,--wrap`) and any `/zip/...` path is read back from the running
+  # binary by the shared unpin-vfs core in self-EOF mode (-DUNPIN_VFS_SELF), so
+  # there is no companion module tree on disk and no blob object/relink. The
   # binary runs biber directly (main injects the embedded /zip/bin/biber driver).
   #
   # The four XS that carry an external C library are linked statically too:
@@ -128,25 +130,6 @@
           # x86_64 buildPackages.biber IS pkgs.biber, so this is a no-op there.
           biber = pkgs.buildPackages.biber;
 
-          # build-time tool: packs the staged @INC tree into a zstd-in-zip blob
-          # (ZIP method 93). Build-host native (the blob is arch-independent), so
-          # it links the system libzstd to COMPRESS; the shipped binary never does
-          # (it decodes with the vendored decompress-only zstddeclib.c).
-          packTool = pkgs.buildPackages.stdenv.mkDerivation {
-            name = "unpin-vfs-pack";
-            dontUnpack = true;
-            buildInputs = [ pkgs.buildPackages.zstd ];
-            buildPhase = ''
-              # -DMINIZ_NO_TIME: the zip writer otherwise stamps each entry with
-              # time(NULL) (current wall clock) -> non-reproducible blob. With it,
-              # timestamps are fixed (0), so the packed blob is byte-deterministic.
-              $CC -O2 -DMINIZ_USE_ZSTD -DMINIZ_NO_TIME -I${./src} \
-                ${./src/unpin-vfs-pack.c} ${./src/miniz.c} ${./src/unpin_zstd.c} \
-                -o unpin-vfs-pack -lzstd
-            '';
-            installPhase = ''mkdir -p $out/bin; cp unpin-vfs-pack $out/bin/'';
-          };
-
           # The 14 pure-XS (no external C library) modules of biber's closure.
           pureXs = {
             inherit (pp) DateSimple Clone EncodeHanExtra ReadonlyXS EncodeEUCJPASCII
@@ -161,7 +144,7 @@
             pname = "biber";
             version = biber.version or "2.21";
             dontUnpack = true;
-            nativeBuildInputs = [ perl pkgs.buildPackages.perl packTool pkgs.buildPackages.zstd pkgs.file ];
+            nativeBuildInputs = [ perl pkgs.buildPackages.perl pkgs.file ];
             buildInputs = [ sp.libxml2 sp.libxslt ];
             PURE_XS_LIST = pureXsList;
             TEXTBIBTEX_SRC = pp.TextBibTeX.src;
@@ -299,9 +282,9 @@
                 $AR cr PV_XS.a PV_XS.o )
               ALLA="$ALLA params/PV_XS.a"; EXTS="$EXTS Params/Validate/XS"
 
-              # ===== VFS objects + the @INC blob (shared unpin-vfs core:
-              # src/vfs.c + src/miniz.c, github:unpins/unpin-vfs, zstd path) =====
-              $CC -O2 -DMINIZ_USE_ZSTD ${lib.optionalString wrap32 "-DUNPIN_WRAP_TIME64"} -I${./src} -c ${./src/vfs.c} -o vfs.o
+              # ===== VFS objects (shared unpin-vfs core: src/vfs.c + src/miniz.c,
+              # github:unpins/unpin-vfs, zstd path, self-EOF mode) =====
+              $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF ${lib.optionalString wrap32 "-DUNPIN_WRAP_TIME64"} -I${./src} -c ${./src/vfs.c} -o vfs.o
               $CC -O2 -DMINIZ_USE_ZSTD -I${./src} -c ${./src/miniz.c} -o miniz.o
               $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I${./src} -c ${./src/unpin_zstd.c} -o unpin_zstd.o
               $CC -O2 -c ${./src/dispatch.c} -o dispatch.o
@@ -367,24 +350,19 @@
                 tail -n +3 ${biber}/bin/biber
               } > stage/bin/biber
 
-              # Scrub /nix store paths out of EVERY staged text file. The deflate
-              # blob hid them (compressed), but the STORED shared dict is trained on
-              # this payload and would bake store-path hashes verbatim -- nix would
-              # then retain biber's whole module closure as spurious references.
+              # Scrub /nix store paths out of EVERY staged text file: the STORED
+              # shared dict (trained by the nix-lib embed) would bake store-path
+              # hashes verbatim -- nix would then retain biber's whole module
+              # closure as spurious references.
               grep -rlI '/nix/store/' stage 2>/dev/null | while read -r f; do
                 sed -i -E "s#/nix/store/[a-z0-9]{32}-[^ '\":]*#/unpin#g" "$f"
               done
+              # The staged tree is NOT packed here: withUnpinEmbed (flake tail)
+              # copies it as the runtime stage and packs the binary's single EOF
+              # ZIP in postFixup (zstd method 93 + shared dict), read back by
+              # the VFS's self-EOF mode -- no blob object, no relink for data.
 
-              # Train a shared zstd dictionary over the staged @INC payload (stable
-              # file order => reproducible; zstd --train is deterministic for a
-              # fixed input). Pack every entry against it; the dict ships as the
-              # STORED ".unpin/zdict" entry, auto-loaded by the VFS at init.
-              ( cd stage && zstd -q -f --train $(find . -type f | LC_ALL=C sort) -o ../zdict --maxdict=112640 )
-              ( cd stage && unpin-vfs-pack ../incblob . --dict ../zdict )
-              cp ${if isDarwin then ./src/blob_darwin.S else ./src/blob.S} blob.S
-              $CC -c blob.S -o incblob.o
-
-              # ===== relink: perl + 19 XS static-ext + VFS + blob + dispatch =====
+              # ===== relink: perl + 19 XS static-ext + VFS + dispatch =====
               COREEXTS="$(cd "$ARCHLIB/auto" && find . -name '*.a' \
                 | sed -e 's|^\./||' -e 's|/[^/]*\.a$||' | sort -u | tr '\n' ' ')"
               # The full set of core static-ext archives. writemain emits a
@@ -407,14 +385,14 @@
                 cp "$ARCHLIB/CORE/libperl.a" libperl_vfs.a; chmod u+w libperl_vfs.a
                 ${objcopy} ${darwinRedef} libperl_vfs.a
                 $CC -O2 -o biber \
-                  perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o incblob.o \
+                  perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o \
                   $ALLA $COREA "$EXSLT_A" "$XSLT_A" "$XML2_A" \
                   $LDO libperl_vfs.a -lm
               '' else ''
                 $CC -O2 -o biber \
                   -Wl,--wrap=open -Wl,--wrap=stat -Wl,--wrap=lstat -Wl,--wrap=access -Wl,--wrap=main \
                   ${lib.optionalString wrap32 "-Wl,--wrap=__stat_time64 -Wl,--wrap=__lstat_time64"} \
-                  perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o incblob.o \
+                  perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o \
                   -Wl,--start-group $ALLA $COREA "$EXSLT_A" "$XSLT_A" "$XML2_A" \
                   $LDO "$ARCHLIB/CORE/libperl.a" -Wl,--end-group -lm
               ''}
@@ -427,7 +405,18 @@
             '';
           };
         in
-        biberBin;
+        # ONE withUnpinEmbed call: the @INC tree staged in buildPhase becomes
+        # the runtime stage (absolute path — postFixup's cwd is wherever the
+        # last phase left it), packed into the binary's single EOF ZIP together
+        # with the man pages (man = true harvests the drv's own share/man;
+        # biberBin ships none, so that part skips — same outcome embedMan had).
+        ulib.withUnpinEmbed pkgs {
+          primary = "biber";
+          man = true;
+          runtimeStage = ''
+            cp -a "$NIX_BUILD_TOP/work/stage/." "$__unpin_stage/"
+          '';
+        } biberBin;
       base = ulib.mkStandaloneFlake {
         inherit self;
         name = "biber";

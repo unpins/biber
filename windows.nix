@@ -2,10 +2,12 @@
 # pkgsCross.mingwW64, so it lands under packages.x86_64-linux."windows-x86_64".
 #
 # Same single-binary design as Linux/darwin: 19 XS folded in as static extensions
-# + the whole @INC packed into the .exe as a ZIP, served by a linker-level VFS.
-# Windows has no memfd, so the VFS materialises each /zip entry to a temp file and
-# delegates to perl's real win32_{open,stat,lstat,access} (intercepted with mingw
-# `ld --wrap`); `--wrap=main` injects the embedded /zip/bin/biber driver.
+# + the whole @INC packed into biber.exe's single EOF ZIP (withUnpinEmbed) and
+# read back by the shared unpin-vfs core in self-EOF mode, served by a
+# linker-level VFS. Windows has no memfd, so the VFS materialises each /zip
+# entry to a temp file and delegates to perl's real win32_{open,stat,lstat,
+# access} (intercepted with mingw `ld --wrap`); `--wrap=main` injects the
+# embedded /zip/bin/biber driver.
 #
 # Two things differ from Linux:
 #   1. The interpreter is a real win32-native perl. nixpkgs' perl-cross only goes
@@ -22,22 +24,6 @@ let
   cross = pkgs.pkgsCross.mingwW64;
   bperl = "${pkgs.buildPackages.perl}/bin/perl";       # native perl: winfix + codegen
   biber = pkgs.buildPackages.biber;                     # arch-indep driver + @INC trees
-  # build-time tool: packs the @INC tree into a zstd-in-zip blob (ZIP method 93).
-  # Build-host native (blob is arch/OS-independent), links libzstd to compress;
-  # the shipped biber.exe decodes with the vendored zstddeclib.c, no zstd runtime.
-  packTool = pkgs.buildPackages.stdenv.mkDerivation {
-    name = "unpin-vfs-pack";
-    dontUnpack = true;
-    buildInputs = [ pkgs.buildPackages.zstd ];
-    buildPhase = ''
-      # -DMINIZ_NO_TIME: fix entry timestamps (0) instead of time(NULL), so the
-      # packed blob is byte-deterministic / reproducible.
-      $CC -O2 -DMINIZ_USE_ZSTD -DMINIZ_NO_TIME -I${./src} \
-        ${./src/unpin-vfs-pack.c} ${./src/miniz.c} ${./src/unpin_zstd.c} \
-        -o unpin-vfs-pack -lzstd
-    '';
-    installPhase = ''mkdir -p $out/bin; cp unpin-vfs-pack $out/bin/'';
-  };
   winDir = ./src/win;
   mcfA = "${cross.windows.mcfgthreads}/lib";            # static libmcfgthread.a
   archSub = "lib/perl5/5.42.0/MSWin32-x64";
@@ -100,11 +86,24 @@ let
   pureXsList = lib.concatStringsSep "\n"
     (lib.mapAttrsToList (n: v: "${n} ${v.src}") pureXs);
 in
-cross.stdenv.mkDerivation {
+# ONE withUnpinEmbed call: the @INC tree staged in buildPhase becomes the
+# runtime stage, packed into biber.exe's single EOF ZIP together with the man
+# pages (harvest-own first, falling back to the version-locked nixpkgs biber
+# man — the same graft mkStandaloneFlake's windows path applied; the passthru
+# flag makes it skip its own withMan pass).
+ulib.withUnpinEmbed pkgs {
+  primary = "biber";
+  man = true;
+  manFallback = "${pkgs.biber.man or pkgs.biber}";
+  runtimeStage = ''
+    cp -a "$NIX_BUILD_TOP/work/stage/." "$__unpin_stage/"
+  '';
+}
+(cross.stdenv.mkDerivation {
   pname = "biber";
   version = biber.version or "2.21";
   dontUnpack = true;
-  nativeBuildInputs = [ pkgs.buildPackages.perl packTool pkgs.buildPackages.zstd pkgs.file ];
+  nativeBuildInputs = [ pkgs.buildPackages.perl pkgs.file ];
   PURE_XS_LIST = pureXsList;
   TEXTBIBTEX_SRC = pp.TextBibTeX.src;
   XMLLIBXML_SRC = pp.XMLLibXML.src;
@@ -300,8 +299,8 @@ cross.stdenv.mkDerivation {
       $AR cr PV_XS.a PV_XS.o )
     ALLA="$ALLA params/PV_XS.a"; EXTS="$EXTS Params/Validate/XS"
 
-    # ===== VFS objects + dispatch + the @INC blob (shared unpin-vfs core, zstd) =====
-    $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -I${./src} -c ${./src/vfs.c} -o vfs.o
+    # ===== VFS objects + dispatch (shared unpin-vfs core, zstd, self-EOF) =====
+    $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -I${./src} -c ${./src/vfs.c} -o vfs.o
     $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -I${./src} -c ${./src/miniz.c} -o miniz.o
     $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I${./src} -c ${./src/unpin_zstd.c} -o unpin_zstd.o
     $CC -O2 -std=gnu17 -c ${./src/dispatch.c} -o dispatch.o
@@ -387,22 +386,17 @@ cross.stdenv.mkDerivation {
         | sed -E '/^use FindBin;/d; /^use lib \$FindBin::RealBin;/d'
     } > stage/bin/biber
 
-    # Scrub /nix store paths out of EVERY staged text file: the STORED shared dict
-    # is trained on this payload and would otherwise bake store-path hashes
+    # Scrub /nix store paths out of EVERY staged text file: the STORED shared
+    # dict (trained by the nix-lib embed) would otherwise bake store-path hashes
     # verbatim, making nix retain biber's whole module closure as spurious refs.
     grep -rlI '/nix/store/' stage 2>/dev/null | while read -r f; do
       sed -i -E "s#/nix/store/[a-z0-9]{32}-[^ '\":]*#/unpin#g" "$f"
     done
+    # The staged tree is NOT packed here: withUnpinEmbed (wrapping this drv)
+    # copies it as the runtime stage and packs biber.exe's single EOF ZIP in
+    # postFixup -- no blob object, no relink for data.
 
-    # train a shared zstd dict over the staged @INC payload (stable order =>
-    # reproducible) and pack every entry against it; the dict ships as the
-    # STORED ".unpin/zdict" entry, auto-loaded by the VFS at init.
-    ( cd stage && zstd -q -f --train $(find . -type f | LC_ALL=C sort) -o ../zdict --maxdict=112640 )
-    ( cd stage && unpin-vfs-pack ../incblob . --dict ../zdict )
-    cp ${./src/blob_win.S} blob.S
-    $CC -c blob.S -o incblob.o
-
-    # ===== relink: perl.exe + 19 XS static-ext + VFS + blob + dispatch =====
+    # ===== relink: perl.exe + 19 XS static-ext + VFS + dispatch =====
     # win32 syslibs the .exe needs (from the target Config) + each kept core
     # ext's extralibs.ld; skip Compress/Raw/* (their extralibs point at the cross
     # zlib/bzip2 DLL import libs -> would need a DLL at runtime).
@@ -424,7 +418,7 @@ cross.stdenv.mkDerivation {
     ICONV_A="$(find ${msc.libiconv}/lib -name 'libiconv.a' | head -1)"
     WRAP="-Wl,--wrap=win32_open -Wl,--wrap=win32_stat -Wl,--wrap=win32_lstat -Wl,--wrap=win32_access -Wl,--wrap=main"
     $CC -O2 -o biber.exe $WRAP \
-      perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o incblob.o \
+      perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o \
       $ALLA $COREA "$EXSLT_A" "$XSLT_A" "$XML2_A" "$Z_A" "$ICONV_A" \
       "$CORE/libperl.a" -Wl,--allow-multiple-definition \
       $SYSLIBS $EXTRALIBS ${mcfA}/libmcfgthread.a -lbcrypt -luserenv -lwinhttp
@@ -436,4 +430,4 @@ cross.stdenv.mkDerivation {
     cp biber.exe $out/bin/biber.exe
     runHook postInstall
   '';
-}
+})
