@@ -401,26 +401,22 @@
             installPhase = ''
               mkdir -p $out/bin
               cp biber $out/bin/biber
+              # Expose the scrubbed @INC stage as a store path so the post-build
+              # embed (runtimeEmbed → unpinEmbedWrap) can pack it: the build dir
+              # is gone by then, so the in-build `$NIX_BUILD_TOP/work/stage` is no
+              # longer reachable. Hidden under $out (not shipped — the final binary
+              # only copies bin/biber; this rides in the base closure).
+              cp -a "$NIX_BUILD_TOP/work/stage" "$out/.unpin-inc"
               runHook postInstall
             '';
           };
         in
-        # ONE withUnpinEmbed call: the @INC tree staged in buildPhase becomes
-        # the runtime stage (absolute path — postFixup's cwd is wherever the
-        # last phase left it), packed into the binary's single EOF ZIP together
-        # with the man page. biberBin is a hand-rolled relink that ships no
-        # share/man of its own, so `manFallback` borrows the version-locked
-        # biber.1 from the build-host biber (POD-generated, OS-independent roff)
-        # — the same graft windows.nix applies. The passthru flag this sets makes
-        # mkStandaloneFlake skip its own withMan pass.
-        ulib.withUnpinEmbed pkgs {
-          primary = "biber";
-          man = true;
-          manFallback = "${biber.man or biber}";
-          runtimeStage = ''
-            cp -a "$NIX_BUILD_TOP/work/stage/." "$__unpin_stage/"
-          '';
-        } biberBin;
+        # The PRISTINE biber base (no embed); the @INC tree + man are embedded
+        # once, post-build, via runtimeEmbed.native → unpinEmbedWrap (the single
+        # embed path). biberBin ships no share/man, so manFallback borrows the
+        # version-locked biber.1 from the build-host biber (POD-generated,
+        # OS-independent roff) — the same graft windows.nix applies.
+        biberBin;
       base = ulib.mkStandaloneFlake {
         inherit self;
         name = "biber";
@@ -433,8 +429,20 @@
         # real win32 perl, folds the 19 XS as static extensions, and relinks with
         # the four win32_* I/O wraps + main wrap serving the embedded @INC ZIP.
         # Lands as packages.x86_64-linux."windows-x86_64".
-        windowsBuild = import ./windows.nix { inherit ulib; };
+        windowsBuild = pkgs: (winMod pkgs).base;
+        runtimeEmbed = {
+          native = pkgs: base: {
+            man = true;
+            manFallback = "${pkgs.buildPackages.biber.man or pkgs.buildPackages.biber}";
+            runtimeStage = ''
+              cp -a ${base}/.unpin-inc/. "$__unpin_stage/"
+              chmod -R u+w "$__unpin_stage"
+            '';
+          };
+          windows = pkgs: base: (winMod pkgs).embed;
+        };
       };
+      winMod = import ./windows.nix { inherit ulib; };
     in
     # Ship: x86_64/aarch64-linux (native) + the four cross-linux arches
     # (i686/ppc64le/riscv64/armv7l, via the build-host-perl codegen flow) +

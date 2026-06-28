@@ -85,21 +85,8 @@ let
   };
   pureXsList = lib.concatStringsSep "\n"
     (lib.mapAttrsToList (n: v: "${n} ${v.src}") pureXs);
-in
-# ONE withUnpinEmbed call: the @INC tree staged in buildPhase becomes the
-# runtime stage, packed into biber.exe's single EOF ZIP together with the man
-# pages (harvest-own first, falling back to the version-locked nixpkgs biber
-# man — the same graft mkStandaloneFlake's windows path applied; the passthru
-# flag makes it skip its own withMan pass).
-ulib.withUnpinEmbed pkgs {
-  primary = "biber";
-  man = true;
-  manFallback = "${pkgs.biber.man or pkgs.biber}";
-  runtimeStage = ''
-    cp -a "$NIX_BUILD_TOP/work/stage/." "$__unpin_stage/"
-  '';
-}
-(cross.stdenv.mkDerivation {
+
+  biberWinBin = (cross.stdenv.mkDerivation {
   pname = "biber";
   version = biber.version or "2.21";
   dontUnpack = true;
@@ -428,6 +415,26 @@ ulib.withUnpinEmbed pkgs {
   installPhase = ''
     mkdir -p $out/bin
     cp biber.exe $out/bin/biber.exe
+    # Expose the scrubbed @INC stage as a store path for the post-build embed
+    # (the in-build $NIX_BUILD_TOP/work/stage is gone by then). Not shipped — the
+    # final biber.exe only copies bin/; this rides in the base closure.
+    cp -a "$NIX_BUILD_TOP/work/stage" "$out/.unpin-inc"
     runHook postInstall
   '';
-})
+});
+in
+# The PRISTINE win32 biber base + the embed spec consumed by mkStandaloneFlake's
+# runtimeEmbed.windows → unpinEmbedWrap (the single embed path): the @INC tree +
+# man (harvest-own first, falling back to the version-locked nixpkgs biber man —
+# the same graft mkStandaloneFlake's windows path applied).
+{
+  base = biberWinBin;
+  embed = {
+    man = true;
+    manFallback = "${pkgs.biber.man or pkgs.biber}";
+    runtimeStage = ''
+      cp -a ${biberWinBin}/.unpin-inc/. "$__unpin_stage/"
+      chmod -R u+w "$__unpin_stage"
+    '';
+  };
+}
