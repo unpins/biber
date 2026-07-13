@@ -444,9 +444,9 @@
               # dispatch.c supplies plain main; the VFS is bound by the IR rewrite at
               # relink, so no -DUNPIN_WRAP_TIME64 (the time64 rename is an IR sed).
               cp ${./src}/*.c ${./src}/*.h .
-              $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -DUNPIN_VFS_NOWRAP -I. -c vfs.c -o vfs.o
-              $CC -O2 -DMINIZ_USE_ZSTD -I. -c miniz.c -o miniz.o
-              $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I. -c unpin_zstd.c -o unpin_zstd.o
+              $CC -O2 -fno-strict-aliasing -fwrapv -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -DUNPIN_VFS_NOWRAP -I. -c vfs.c -o vfs.o
+              $CC -O2 -fno-strict-aliasing -fwrapv -DMINIZ_USE_ZSTD -I. -c miniz.c -o miniz.o
+              $CC -O2 -fno-strict-aliasing -fwrapv -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I. -c unpin_zstd.c -o unpin_zstd.o
               $CC -O2 -DUNPIN_DISPATCH_NOWRAP -c dispatch.c -o dispatch.o
 
               # Stage the @INC: every `use lib` tree from the nixpkgs biber driver
@@ -672,9 +672,10 @@
           echo "===UNPIN-DARWIN-DIAG-START==="
           echo "===UNPIN-ZIP inc/perl count: $(unzip -l "$out/bin/biber" 2>/dev/null | grep -cE ' inc/perl/')==="
           echo "===UNPIN-ZIP strict.pm: $(unzip -l "$out/bin/biber" 2>/dev/null | grep -E ' inc/perl/strict\.pm' | head -1)==="
-          echo "===UNPIN-ZIP sample inc/perl entries==="
-          unzip -l "$out/bin/biber" 2>/dev/null | grep -E ' inc/perl/[A-Za-z]' | head -5
           echo "===UNPIN-ZIP total: $(unzip -l "$out/bin/biber" 2>/dev/null | tail -1)==="
+          echo "===UNPIN-ZIP-EXTRACT strict.pm head (real content => ZIP offsets ok; garbage/err => malformed):==="
+          unzip -p "$out/bin/biber" inc/perl/strict.pm 2>&1 | head -3
+          echo "===UNPIN-ZIP-EXTRACT-END==="
           if "$out/bin/biber" --version 2>&1; then
             echo "===UNPIN-DARWIN-DIAG: exit 0==="
           else
