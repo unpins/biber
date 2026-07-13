@@ -483,13 +483,6 @@
               # core .pm like Cwd/Config live under the <arch> subdir).
               mkdir -p stage/inc/perl
               cp -rL "$PRIVLIB"/. stage/inc/perl/
-              ${lib.optionalString isDarwin ''
-                echo "===UNPIN-STAGE-DIAG PRIVLIB=[$PRIVLIB]==="
-                echo "===UNPIN-STAGE-DIAG PRIVLIB exists: $([ -d "$PRIVLIB" ] && echo yes || echo no)==="
-                echo "===UNPIN-STAGE-DIAG stage/inc/perl .pm count: $(find stage/inc/perl -name '*.pm' 2>/dev/null | wc -l)==="
-                echo "===UNPIN-STAGE-DIAG strict.pm present: $([ -e stage/inc/perl/strict.pm ] && echo yes || echo no)==="
-                echo "===UNPIN-STAGE-DIAG ARCHLIB=[$ARCHLIB]==="
-              ''}
               ARCHB=$(basename "$ARCHLIB")
               ${lib.optionalString crossCompiling ''
                 # perl-cross's -Uusedl build omits a few core .pm that the static
@@ -612,11 +605,6 @@
               # longer reachable. Hidden under $out (not shipped — the final binary
               # only copies bin/biber; this rides in the base closure).
               cp -a "$NIX_BUILD_TOP/work/stage" "$out/.unpin-inc"
-              ${lib.optionalString isDarwin ''
-                echo "===UNPIN-INSTALL-DIAG .unpin-inc/inc/perl .pm: $(find "$out/.unpin-inc/inc/perl" -name '*.pm' 2>/dev/null | wc -l)==="
-                echo "===UNPIN-INSTALL-DIAG .unpin-inc strict.pm: $([ -e "$out/.unpin-inc/inc/perl/strict.pm" ] && echo yes || echo no)==="
-                echo "===UNPIN-INSTALL-DIAG total files under .unpin-inc: $(find "$out/.unpin-inc" -type f 2>/dev/null | wc -l)==="
-              ''}
               runHook postInstall
             '';
           };
@@ -661,28 +649,6 @@
         };
       };
       winMod = import ./windows.nix { inherit ulib; };
-      # TEMP DIAGNOSTIC (remove after darwin smoke is diagnosed): the CI smoke
-      # step captures `biber --version` under `set -e`, so a non-zero run hides
-      # its message. Run the FULLY EMBEDDED binary at the tail of the embed
-      # runCommand (native aarch64-darwin executes on the aarch64 runner; the
-      # darwin-x86_64 cross runs under Rosetta on macos-14) and echo the output
-      # into the BUILD log, which is NOT swallowed. Non-fatal.
-      diagDarwin = drv: drv.overrideAttrs (old: {
-        buildCommand = (old.buildCommand or "") + ''
-          set +e
-          echo "===UNPIN-DARWIN-DIAG-START==="
-          echo "===UNPIN-ZIP total: $(unzip -l "$out/bin/biber" 2>/dev/null | tail -1)==="
-          __strict="$(unzip -p "$out/bin/biber" inc/perl/strict.pm 2>&1)"; __rc=$?
-          echo "===UNPIN-ZIP-EXTRACT rc=$__rc bytes=''${#__strict} head=[''${__strict:0:70}]==="
-          __ver="$(UNPIN_VFS_DEBUG=1 "$out/bin/biber" --version 2>&1)"; __vrc=$?
-          echo "===UNPIN-DARWIN-DIAG version rc=$__vrc out=[''${__ver:0:320}]==="
-          echo "===UNPIN-NM file-op imports (U = calls real libc, not the VFS shim):==="
-          nm "$out/bin/biber" 2>/dev/null | grep -E ' U _(stat|lstat|open|access|fstatat|stat64|getattrlist)' | sort -u | head -30
-          echo "===UNPIN-NM-END==="
-          echo "===UNPIN-DARWIN-DIAG-END==="
-          set -e
-        '';
-      });
     in
     # Ship: x86_64/aarch64-linux (native) + the four cross-linux arches
     # (i686/ppc64le/riscv64/armv7l, via the build-host-perl codegen flow) +
@@ -691,12 +657,5 @@
     # redefs). CI has no x86_64-darwin runner, so that cross attr is the
     # ONLY path to an Intel macOS release asset; the native x86_64-darwin
     # output only ever builds locally.
-    base // {
-      packages = base.packages // {
-        aarch64-darwin = base.packages.aarch64-darwin // {
-          default = diagDarwin base.packages.aarch64-darwin.default;
-          "darwin-x86_64" = diagDarwin base.packages.aarch64-darwin."darwin-x86_64";
-        };
-      };
-    };
+    base;
 }

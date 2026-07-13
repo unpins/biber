@@ -148,18 +148,6 @@ int unpin_vfs_init(void) {
     g_state = (self && mz_zip_reader_init_cfile(&g_zip, self, self_size, 0)) ? 1 : 2;
     if (g_state != 1 && self) fclose(self);
     /* On success `self` is owned by g_zip for the process lifetime. */
-    /* TEST(unconditional prime): calling the shims for a /zip path during init
-     * made aarch64-darwin --version succeed where the plain smoke fails. Confirm
-     * without the debug env by priming here always. */
-    if (g_state == 1) {
-        struct stat _pst;
-        (void)unpin_vfs_stat("/zip/inc/perl/strict.pm", &_pst);
-        int _pfd = unpin_vfs_open("/zip/inc/perl/strict.pm", O_RDONLY);
-        (void)_pfd;
-    }
-    if (getenv("UNPIN_VFS_DEBUG"))
-        fprintf(stderr, "UNPINVFS_DBG self_size=%llu state=%d\n",
-                (unsigned long long)self_size, g_state);
 #else
     size_t size = (size_t)(BLOB_END - BLOB_BEG);
     g_state = mz_zip_reader_init_mem(&g_zip, BLOB_BEG, size, 0) ? 1 : 2;
