@@ -454,7 +454,7 @@
               # dispatch.c supplies plain main; the VFS is bound by the IR rewrite at
               # relink, so no -DUNPIN_WRAP_TIME64 (the time64 rename is an IR sed).
               cp ${./src}/*.c ${./src}/*.h .
-              $CC -O2 ${lib.optionalString isDarwin "-DUNPIN_VFS_FILETRACE"} -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -DUNPIN_VFS_NOWRAP -I. -c vfs.c -o vfs.o
+              $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -DUNPIN_VFS_NOWRAP -I. -c vfs.c -o vfs.o
               $CC -O2 -DMINIZ_USE_ZSTD -I. -c miniz.c -o miniz.o
               $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I. -c unpin_zstd.c -o unpin_zstd.o
               $CC -O2 -DUNPIN_DISPATCH_NOWRAP -c dispatch.c -o dispatch.o
@@ -659,26 +659,6 @@
         };
       };
       winMod = import ./windows.nix { inherit ulib; };
-      # TEMP DIAGNOSTIC (remove after diagnosis): decide whether the aarch64-
-      # darwin "Can't locate strict.pm" is a layout-sensitive codegen miscompile
-      # or a real logic/state bug. Run the UNMODIFIED packed binary under a
-      # matrix of environments (zero code perturbation — only the runtime env
-      # varies) at the tail of the embed runCommand (aarch64 runner) and echo rc
-      # into the build log. If an UNRELATED env var (touching no code) flips
-      # rc=2->0, it is definitively env-block/stack-layout sensitive => a
-      # clang-21 LTO codegen miscompile, not a dict/zstd/logic bug.
-      diagDarwin = drv: drv.overrideAttrs (old: {
-        buildCommand = (old.buildCommand or "") + ''
-          set +e
-          B="$out/bin/biber"
-          echo "===UNPIN-TRACE-START==="
-          TF="$NIX_BUILD_TOP/unpin_trace.txt"; rm -f "$TF"
-          O="$(UNPIN_TRACE_FILE="$TF" "$B" --version 2>&1)"; echo "traced rc=$? out=[''${O: -100}]"
-          echo "--- trace file (head 60) ---"; head -60 "$TF" 2>/dev/null; echo "--- end trace ($(wc -l < "$TF" 2>/dev/null) lines) ---"
-          echo "===UNPIN-TRACE-END==="
-          set -e
-        '';
-      });
     in
     # Ship: x86_64/aarch64-linux (native) + the four cross-linux arches
     # (i686/ppc64le/riscv64/armv7l, via the build-host-perl codegen flow) +
@@ -687,11 +667,5 @@
     # redefs). CI has no x86_64-darwin runner, so that cross attr is the
     # ONLY path to an Intel macOS release asset; the native x86_64-darwin
     # output only ever builds locally.
-    base // {
-      packages = base.packages // {
-        aarch64-darwin = base.packages.aarch64-darwin // {
-          default = diagDarwin base.packages.aarch64-darwin.default;
-        };
-      };
-    };
+    base;
 }
