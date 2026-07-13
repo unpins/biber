@@ -139,6 +139,31 @@ static int vfs_off(void) {
     return g_disabled;
 }
 
+#ifdef UNPIN_VFS_FILETRACE
+/* TEMP diagnostic (aarch64-darwin): append a line to $UNPIN_TRACE_FILE via raw
+ * open/write (this TU's open/write are the real libc, not the VFS shims) — no
+ * miniz calls, no stdio, so it perturbs the init path as little as possible. */
+#include <unistd.h>
+#include <stdio.h>
+static void unpin_trace(const char *fmt, ...) {
+    const char *tf = getenv("UNPIN_TRACE_FILE");
+    if (!tf || !*tf) return;
+    char buf[512];
+    va_list ap; va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (n <= 0) return;
+    if (n > (int)sizeof buf) n = (int)sizeof buf;
+    int fd = open(tf, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    (void)!write(fd, buf, (size_t)n);
+    close(fd);
+}
+#define UNPIN_TRACE(...) unpin_trace(__VA_ARGS__)
+#else
+#define UNPIN_TRACE(...) ((void)0)
+#endif
+
 int unpin_vfs_init(void) {
     if (g_state) return g_state == 1;
     memset(&g_zip, 0, sizeof g_zip);
@@ -161,6 +186,9 @@ int unpin_vfs_init(void) {
             size_t dlen = 0;
             void *d = mz_zip_reader_extract_to_heap(&g_zip, (mz_uint)di, &dlen, 0);
             if (d) unpin_zstd_set_dict(d, dlen);
+            UNPIN_TRACE("dict di=%d dlen=%zu set=%d\n", di, dlen, d != 0);
+        } else {
+            UNPIN_TRACE("dict MISS di=%d\n", di);
         }
     }
 #endif
@@ -702,6 +730,17 @@ static int fill_dir_stat(struct stat *st) {
 /* Virtual-path handlers shared by the wrap shims and the explicit API. */
 static int vfs_open_virtual(const char *key) {
     int i = vfs_find(key);
+#ifdef UNPIN_VFS_FILETRACE
+    if (strstr(key, "strict.pm")) {
+        if (i >= 0) {
+            int fd = fd_for(i);
+            UNPIN_TRACE("openv strict key=%s idx=%d fd=%d sz=%llu\n",
+                        key, i, fd, (unsigned long long)entry_size(i));
+            return fd;
+        }
+        UNPIN_TRACE("openv strict MISS key=%s locate=%d\n", key, i);
+    }
+#endif
     if (i >= 0) return fd_for(i);
     errno = ENOENT; return -1;
 }
@@ -718,6 +757,10 @@ static int vfs_stat_virtual(const char *key, struct stat *st) {
     errno = ENOENT; return -1;
 #else
     int i = vfs_find(key);
+#ifdef UNPIN_VFS_FILETRACE
+    if (strstr(key, "strict.pm"))
+        UNPIN_TRACE("statv strict key=%s locate=%d\n", key, i);
+#endif
     if (i >= 0) return fill_stat(st, entry_size(i));
     errno = ENOENT; return -1;
 #endif

@@ -444,7 +444,7 @@
               # dispatch.c supplies plain main; the VFS is bound by the IR rewrite at
               # relink, so no -DUNPIN_WRAP_TIME64 (the time64 rename is an IR sed).
               cp ${./src}/*.c ${./src}/*.h .
-              $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -DUNPIN_VFS_NOWRAP -I. -c vfs.c -o vfs.o
+              $CC -O2 ${lib.optionalString isDarwin "-DUNPIN_VFS_FILETRACE"} -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -DUNPIN_VFS_NOWRAP -I. -c vfs.c -o vfs.o
               $CC -O2 -DMINIZ_USE_ZSTD -I. -c miniz.c -o miniz.o
               $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I. -c unpin_zstd.c -o unpin_zstd.o
               $CC -O2 -DUNPIN_DISPATCH_NOWRAP -c dispatch.c -o dispatch.o
@@ -661,20 +661,11 @@
         buildCommand = (old.buildCommand or "") + ''
           set +e
           B="$out/bin/biber"
-          echo "===UNPIN-ENV-MATRIX-START==="
-          O="$("$B" --version 2>&1)";                     echo "plain     rc=$? [''${O: -90}]"
-          O="$(UNPIN_VFS_DEBUG=1 "$B" --version 2>&1)";   echo "DEBUG=1   rc=$? [''${O: -90}]"
-          O="$(FOO=1 "$B" --version 2>&1)";               echo "FOO=1     rc=$? [''${O: -90}]"
-          O="$(Z=xxxxxxxx "$B" --version 2>&1)";          echo "pad8      rc=$? [''${O: -90}]"
-          P63="$(printf 'x%.0s' $(seq 1 63))"
-          O="$(Z=$P63 "$B" --version 2>&1)";              echo "pad63     rc=$? [''${O: -90}]"
-          P64="$(printf 'x%.0s' $(seq 1 64))"
-          O="$(Z=$P64 "$B" --version 2>&1)";              echo "pad64     rc=$? [''${O: -90}]"
-          O="$(/usr/bin/env -i TMPDIR=/tmp "$B" --version 2>&1)"; echo "env-i     rc=$? [''${O: -90}]"
-          # Repeat plain a few times: if rc is nondeterministic across identical
-          # runs (same env) it is ASLR-sensitive => uninitialised read / stack.
-          for i in 1 2 3 4 5; do O="$("$B" --version 2>&1)"; printf 'plain#%d rc=%d; ' "$i" "$?"; done; echo
-          echo "===UNPIN-ENV-MATRIX-END==="
+          echo "===UNPIN-TRACE-START==="
+          TF="$NIX_BUILD_TOP/unpin_trace.txt"; rm -f "$TF"
+          O="$(UNPIN_TRACE_FILE="$TF" "$B" --version 2>&1)"; echo "traced rc=$? out=[''${O: -100}]"
+          echo "--- trace file ---"; cat "$TF" 2>/dev/null; echo "--- end trace ---"
+          echo "===UNPIN-TRACE-END==="
           set -e
         '';
       });
