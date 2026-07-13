@@ -612,6 +612,11 @@
               # longer reachable. Hidden under $out (not shipped — the final binary
               # only copies bin/biber; this rides in the base closure).
               cp -a "$NIX_BUILD_TOP/work/stage" "$out/.unpin-inc"
+              ${lib.optionalString isDarwin ''
+                echo "===UNPIN-INSTALL-DIAG .unpin-inc/inc/perl .pm: $(find "$out/.unpin-inc/inc/perl" -name '*.pm' 2>/dev/null | wc -l)==="
+                echo "===UNPIN-INSTALL-DIAG .unpin-inc strict.pm: $([ -e "$out/.unpin-inc/inc/perl/strict.pm" ] && echo yes || echo no)==="
+                echo "===UNPIN-INSTALL-DIAG total files under .unpin-inc: $(find "$out/.unpin-inc" -type f 2>/dev/null | wc -l)==="
+              ''}
               runHook postInstall
             '';
           };
@@ -665,6 +670,11 @@
       diagDarwin = drv: drv.overrideAttrs (old: {
         buildCommand = (old.buildCommand or "") + ''
           echo "===UNPIN-DARWIN-DIAG-START==="
+          echo "===UNPIN-ZIP inc/perl count: $(unzip -l "$out/bin/biber" 2>/dev/null | grep -cE ' inc/perl/')==="
+          echo "===UNPIN-ZIP strict.pm: $(unzip -l "$out/bin/biber" 2>/dev/null | grep -E ' inc/perl/strict\.pm' | head -1)==="
+          echo "===UNPIN-ZIP sample inc/perl entries==="
+          unzip -l "$out/bin/biber" 2>/dev/null | grep -E ' inc/perl/[A-Za-z]' | head -5
+          echo "===UNPIN-ZIP total: $(unzip -l "$out/bin/biber" 2>/dev/null | tail -1)==="
           if "$out/bin/biber" --version 2>&1; then
             echo "===UNPIN-DARWIN-DIAG: exit 0==="
           else
