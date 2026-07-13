@@ -44,7 +44,6 @@
           # for the arches that linked before.
           host = sp.stdenv.hostPlatform;
           isDarwin = host.isDarwin or false;
-          isArmDarwin = isDarwin && (host.isAarch64 or false);
           prefix = sp.stdenv.cc.targetPrefix;
           perl = sp.perl.overrideAttrs (old:
           let
@@ -447,11 +446,7 @@
               cp ${./src}/*.c ${./src}/*.h .
               $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -DUNPIN_VFS_NOWRAP -I. -c vfs.c -o vfs.o
               $CC -O2 -DMINIZ_USE_ZSTD -I. -c miniz.c -o miniz.o
-              # TEST(aarch64-darwin): `open` (decompress) fails while `stat` (no
-              # decompress) works — isolate a suspected clang-21 whole-program-LTO
-              # miscompile of the vendored zstd decoder by compiling this TU
-              # LTO-opaque (native -O2 object, immune to the final LTO codegen).
-              $CC -O2 ${lib.optionalString isArmDarwin "-fno-lto"} -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I. -c unpin_zstd.c -o unpin_zstd.o
+              $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I. -c unpin_zstd.c -o unpin_zstd.o
               $CC -O2 -DUNPIN_DISPATCH_NOWRAP -c dispatch.c -o dispatch.o
 
               # Stage the @INC: every `use lib` tree from the nixpkgs biber driver
@@ -654,6 +649,35 @@
         };
       };
       winMod = import ./windows.nix { inherit ulib; };
+      # TEMP DIAGNOSTIC (remove after diagnosis): decide whether the aarch64-
+      # darwin "Can't locate strict.pm" is a layout-sensitive codegen miscompile
+      # or a real logic/state bug. Run the UNMODIFIED packed binary under a
+      # matrix of environments (zero code perturbation — only the runtime env
+      # varies) at the tail of the embed runCommand (aarch64 runner) and echo rc
+      # into the build log. If an UNRELATED env var (touching no code) flips
+      # rc=2->0, it is definitively env-block/stack-layout sensitive => a
+      # clang-21 LTO codegen miscompile, not a dict/zstd/logic bug.
+      diagDarwin = drv: drv.overrideAttrs (old: {
+        buildCommand = (old.buildCommand or "") + ''
+          set +e
+          B="$out/bin/biber"
+          echo "===UNPIN-ENV-MATRIX-START==="
+          O="$("$B" --version 2>&1)";                     echo "plain     rc=$? [''${O: -90}]"
+          O="$(UNPIN_VFS_DEBUG=1 "$B" --version 2>&1)";   echo "DEBUG=1   rc=$? [''${O: -90}]"
+          O="$(FOO=1 "$B" --version 2>&1)";               echo "FOO=1     rc=$? [''${O: -90}]"
+          O="$(Z=xxxxxxxx "$B" --version 2>&1)";          echo "pad8      rc=$? [''${O: -90}]"
+          P63="$(printf 'x%.0s' $(seq 1 63))"
+          O="$(Z=$P63 "$B" --version 2>&1)";              echo "pad63     rc=$? [''${O: -90}]"
+          P64="$(printf 'x%.0s' $(seq 1 64))"
+          O="$(Z=$P64 "$B" --version 2>&1)";              echo "pad64     rc=$? [''${O: -90}]"
+          O="$(/usr/bin/env -i TMPDIR=/tmp "$B" --version 2>&1)"; echo "env-i     rc=$? [''${O: -90}]"
+          # Repeat plain a few times: if rc is nondeterministic across identical
+          # runs (same env) it is ASLR-sensitive => uninitialised read / stack.
+          for i in 1 2 3 4 5; do O="$("$B" --version 2>&1)"; printf 'plain#%d rc=%d; ' "$i" "$?"; done; echo
+          echo "===UNPIN-ENV-MATRIX-END==="
+          set -e
+        '';
+      });
     in
     # Ship: x86_64/aarch64-linux (native) + the four cross-linux arches
     # (i686/ppc64le/riscv64/armv7l, via the build-host-perl codegen flow) +
@@ -662,5 +686,11 @@
     # redefs). CI has no x86_64-darwin runner, so that cross attr is the
     # ONLY path to an Intel macOS release asset; the native x86_64-darwin
     # output only ever builds locally.
-    base;
+    base // {
+      packages = base.packages // {
+        aarch64-darwin = base.packages.aarch64-darwin // {
+          default = diagDarwin base.packages.aarch64-darwin.default;
+        };
+      };
+    };
 }
