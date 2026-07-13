@@ -35,6 +35,14 @@
  *   UNPIN_VFS_BLOB_SYM  blob symbol base name (bare identifier), default incblob
  *   MINIZ_USE_ZSTD      accept method-93 (zstd) entries + dict auto-load
  *   UNPIN_WRAP_TIME64   also wrap __stat_time64/__lstat_time64 (32-bit musl)
+ *   UNPIN_VFS_NOWRAP    name the interceptors unpinvfs_* (not __wrap_*) so the
+ *                       consumer's libc open/stat/... are rerouted by SYMBOL
+ *                       RENAME (objcopy/IR rewrite) instead of `ld --wrap` --
+ *                       the mega-safe binding the bitcode engine uses (tcc).
+ *                       Implied on macOS (ld64 has no --wrap).
+ *   UNPIN_VFS_WIN_WRAPOPEN  Windows: `ld --wrap=open` on plain msvcrt open()
+ *                       (for a consumer that calls open() directly, e.g. tcc),
+ *                       instead of the perl win32_* layer or vim marker mode.
  */
 #ifndef UNPIN_VFS_H
 #define UNPIN_VFS_H

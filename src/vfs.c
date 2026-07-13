@@ -180,6 +180,38 @@ static uint64_t entry_size(int idx) {
     return (uint64_t)st.m_uncomp_size;
 }
 
+/* Lexically resolve "." and ".." in a '/'-separated relative key, in place.
+ * tcc emits relative #includes literally ("#include \"../math.h\"" from
+ * .../tcc/tcc_libm.h opens ".../tcc/../math.h"), but the ZIP keys are clean
+ * (".../math.h"), so the VFS must canonicalise. Inert for already-clean keys
+ * (file/perl/python carry no "." / ".." segments), so applied to every virtual
+ * key unconditionally. */
+#define VFS_PATHMAX 4096
+static void path_canon(char *s) {
+    const char *segs[256];
+    size_t lens[256];
+    int sp = 0;
+    const char *p = s;
+    while (*p) {
+        if (*p == '/') { p++; continue; }
+        const char *seg = p;
+        while (*p && *p != '/') p++;
+        size_t len = (size_t)(p - seg);
+        if (len == 1 && seg[0] == '.') continue;
+        if (len == 2 && seg[0] == '.' && seg[1] == '.') { if (sp > 0) sp--; continue; }
+        if (sp < 256) { segs[sp] = seg; lens[sp] = len; sp++; }
+    }
+    char buf[VFS_PATHMAX];
+    size_t o = 0;
+    for (int i = 0; i < sp && o + lens[i] + 1 < sizeof(buf); i++) {
+        if (i) buf[o++] = '/';
+        memcpy(buf + o, segs[i], lens[i]);
+        o += lens[i];
+    }
+    buf[o] = '\0';
+    memcpy(s, buf, o + 1);
+}
+
 int unpin_vfs_is_virtual(const char *path) {
     if (!path) return 0;
 #if defined(_WIN32) && defined(UNPIN_VFS_WIN_MARKER)
@@ -274,6 +306,7 @@ static int marker_key(const char *p, char *out, size_t n) {
         out[i] = (rest[i] == '\\') ? '/' : rest[i];  /* ZIP keys use '/' */
     if (rest[i]) return 0;                            /* key too long */
     out[i] = '\0';
+    path_canon(out);
     return 1;
 }
 
@@ -337,15 +370,11 @@ int unpin_vfs_access(const char *path, int mode) {
     return _access(path, mode);
 }
 
-#else /* default (perl): --wrap=win32_* delegating to the program's real win32_* */
-
-extern int __real_win32_open(const char *path, int oflag, ...);
-extern int __real_win32_stat(const char *name, void *stbuf);
-extern int __real_win32_lstat(const char *name, void *stbuf);
-extern int __real_win32_access(const char *path, int mode);
+#else /* non-marker windows: strict /zip prefix (win_key) + materialise */
 
 /* Normalise into a /zip-rooted forward-slash key (path munging can emit
- * backslashes). Returns 1 and writes the stripped lookup key into out. */
+ * backslashes) and canonicalise. Returns 1 and writes the lookup key into out.
+ * Shared by the plain-open (tcc) and win32_* (perl) bindings below. */
 static int win_key(const char *p, char *out, size_t n) {
     if (vfs_off() || !p) return 0;
     char norm[MAX_PATH];
@@ -363,8 +392,69 @@ static int win_key(const char *p, char *out, size_t n) {
     size_t kl = strlen(key);
     if (kl + 1 > n) return 0;
     memcpy(out, key, kl + 1);
+    path_canon(out);
     return 1;
 }
+
+#ifdef UNPIN_VFS_WIN_WRAPOPEN
+/* ---- tcc mode: `ld --wrap=open` on plain msvcrt open() ------------------ */
+/* tcc reads every source/header/archive/.def through open(path,O_RDONLY|
+ * O_BINARY) and makes NO stat/lstat/access calls, so a single __wrap_open is
+ * the whole VFS here. Output files (.exe/.def) go through fopen()/CreateFile and
+ * never carry the /zip prefix, so they fall through untouched. */
+extern int __real_open(const char *path, int oflag, ...);
+
+int __wrap_open(const char *path, int oflag, ...) {
+    char key[MAX_PATH];
+    if (win_key(path, key, sizeof(key))) {
+        int i = vfs_find(key);
+        if (i < 0) { errno = ENOENT; return -1; }
+        const char *m = materialize(i);
+        if (!m) { errno = EIO; return -1; }
+        return __real_open(m, _O_RDONLY | _O_BINARY, 0);
+    }
+    if (oflag & _O_CREAT) {
+        va_list ap; va_start(ap, oflag);
+        int mode = va_arg(ap, int);
+        va_end(ap);
+        return __real_open(path, oflag, mode);
+    }
+    return __real_open(path, oflag);
+}
+
+/* Explicit API maps onto __wrap_open / the CRT; tcc makes no stat on Windows. */
+int unpin_vfs_open(const char *path, int flags, ...) {
+    if (flags & _O_CREAT) {
+        va_list ap; va_start(ap, flags); int m = va_arg(ap, int); va_end(ap);
+        return __wrap_open(path, flags, m);
+    }
+    return __wrap_open(path, flags);
+}
+int unpin_vfs_stat(const char *path, struct stat *st) {
+    char key[MAX_PATH];
+    if (win_key(path, key, sizeof key)) {
+        int i = vfs_find(key);
+        if (i < 0) { errno = ENOENT; return -1; }
+        const char *m = materialize(i);
+        if (!m) { errno = EIO; return -1; }
+        return stat(m, st);
+    }
+    return stat(path, st);
+}
+int unpin_vfs_lstat(const char *path, struct stat *st) { return unpin_vfs_stat(path, st); }
+int unpin_vfs_access(const char *path, int mode) {
+    char key[MAX_PATH];
+    if (win_key(path, key, sizeof key))
+        return vfs_find(key) >= 0 ? 0 : (errno = ENOENT, -1);
+    return _access(path, mode);
+}
+
+#else /* default (perl): --wrap=win32_* delegating to the program's real win32_* */
+
+extern int __real_win32_open(const char *path, int oflag, ...);
+extern int __real_win32_stat(const char *name, void *stbuf);
+extern int __real_win32_lstat(const char *name, void *stbuf);
+extern int __real_win32_access(const char *path, int mode);
 
 int __wrap_win32_open(const char *path, int oflag, ...) {
     char key[MAX_PATH];
@@ -426,6 +516,7 @@ int unpin_vfs_open(const char *path, int flags, ...) {
 int unpin_vfs_stat(const char *path, struct stat *st)  { return __wrap_win32_stat(path, st); }
 int unpin_vfs_lstat(const char *path, struct stat *st) { return __wrap_win32_lstat(path, st); }
 int unpin_vfs_access(const char *path, int mode)       { return __wrap_win32_access(path, mode); }
+#endif /* UNPIN_VFS_WIN_WRAPOPEN */
 #endif /* UNPIN_VFS_WIN_MARKER */
 
 /* ======================================================================= */
@@ -441,15 +532,24 @@ int unpin_vfs_access(const char *path, int mode)       { return __wrap_win32_acc
 #endif
 #endif
 
-/* POSIX key: path with the leading VFS_ROOT stripped (no backslashes). */
+/* POSIX key: path with the leading VFS_ROOT stripped (no backslashes), then
+ * canonicalised. Copies into a static buffer (single-threaded per lookup; the
+ * key is consumed immediately by vfs_find) so path_canon can rewrite in place. */
 static const char *posix_key(const char *p) {
+    static char keybuf[VFS_PATHMAX];
     if (vfs_off() || !p) return NULL;
     /* Match the root, tolerating the bare mount point (see unpin_vfs_is_virtual). */
     if (strncmp(p, VFS_ROOT, VFS_ROOT_LEN - 1) != 0) return NULL;
     char c = p[VFS_ROOT_LEN - 1];
-    if (c == '/')  return p + VFS_ROOT_LEN;      /* "<root>/rest" -> "rest" */
-    if (c == '\0') return p + VFS_ROOT_LEN - 1;  /* bare "<root>"  -> ""     */
-    return NULL;
+    const char *k;
+    if (c == '/')       k = p + VFS_ROOT_LEN;      /* "<root>/rest" -> "rest" */
+    else if (c == '\0') k = p + VFS_ROOT_LEN - 1;  /* bare "<root>"  -> ""     */
+    else return NULL;
+    size_t kl = strlen(k);
+    if (kl + 1 > sizeof keybuf) return NULL;
+    memcpy(keybuf, k, kl + 1);
+    path_canon(keybuf);
+    return keybuf;
 }
 
 static int write_all(int fd, const unsigned char *data, size_t len) {
@@ -463,8 +563,10 @@ static int write_all(int fd, const unsigned char *data, size_t len) {
     return 0;
 }
 
+/* anon_fd: a fresh anonymous SEEKABLE fd — the PLATFORM axis, independent of the
+ * VFS binding below. Linux has a real anonymous kernel fd (memfd); macOS has no
+ * memfd, so a temp file unlinked immediately. */
 #if defined(__APPLE__)
-/* macOS: no memfd -- temp file, unlink immediately => anonymous seekable fd. */
 #include <stdio.h>
 static int anon_fd(const unsigned char *data, size_t len) {
     const char *t = getenv("TMPDIR");
@@ -479,6 +581,27 @@ static int anon_fd(const unsigned char *data, size_t len) {
     if (write_all(fd, data, len) < 0) { close(fd); return -1; }
     return fd;
 }
+#else
+static int anon_fd(const unsigned char *data, size_t len) {
+    int fd = (int)syscall(SYS_memfd_create, "unpinvfs", 0u);
+    if (fd < 0) return -1;
+    if (write_all(fd, data, len) < 0) { close(fd); return -1; }
+    return fd;
+}
+#endif
+
+/* VFS binding — how a consumer's open/stat/lstat/access reach the VFS. Distinct
+ * from the platform axis above: a Linux engine build (memfd) still takes the
+ * rename binding.
+ *   rename (unpinvfs_*): the consumer's libc open/stat/... symbols are renamed
+ *     to unpinvfs_* — objcopy on Mach-O imports (ld64 has no --wrap), or the
+ *     bitcode engine rewriting the IR symbols (-DUNPIN_VFS_NOWRAP, tcc). This TU
+ *     is NEVER renamed, so it NAMES its interceptors unpinvfs_* and calls the
+ *     genuine libc directly. No linker-global --wrap → never reroutes another
+ *     applet's open: the only binding safe to fold into the unpinbox mega.
+ *   --wrap (__wrap_*): a standalone GNU-ld link passes -Wl,--wrap=open,… so
+ *     __wrap_* intercept and __real_* are the genuine libc. NOT mega-safe. */
+#if defined(__APPLE__) || defined(UNPIN_VFS_NOWRAP)
 #  define OPEN_FN    unpinvfs_open
 #  define STAT_FN    unpinvfs_stat
 #  define LSTAT_FN   unpinvfs_lstat
@@ -498,17 +621,10 @@ static int anon_fd(const unsigned char *data, size_t len) {
 #    define REAL_FOPEN(p, m)  fopen((p), (m))
 #  endif
 #else
-/* Linux: a real anonymous kernel fd. */
 extern int __real_open(const char *path, int flags, ...);
 extern int __real_stat(const char *path, struct stat *st);
 extern int __real_lstat(const char *path, struct stat *st);
 extern int __real_access(const char *path, int mode);
-static int anon_fd(const unsigned char *data, size_t len) {
-    int fd = (int)syscall(SYS_memfd_create, "unpinvfs", 0u);
-    if (fd < 0) return -1;
-    if (write_all(fd, data, len) < 0) { close(fd); return -1; }
-    return fd;
-}
 #  define OPEN_FN    __wrap_open
 #  define STAT_FN    __wrap_stat
 #  define LSTAT_FN   __wrap_lstat

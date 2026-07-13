@@ -8,10 +8,13 @@
  * script on disk. Unlike perl's multicall dispatch.c there is no applet list:
  * biber is the only program, so every invocation runs it.
  *
- *   ELF (Linux):    -Wl,--wrap=main routes the crt's main() to __wrap_main;
- *                   __real_main is perl's own generated main.
- *   Mach-O (macOS): perl's perlmain.o has _main renamed to _real_main via
- *                   llvm-objcopy --redefine-sym, and this object supplies _main.
+ *   Engine (Linux + macOS, -DUNPIN_DISPATCH_NOWRAP): under the unpin-llvm engine
+ *                   every object is LLVM bitcode, so neither `ld --wrap` nor
+ *                   `objcopy --redefine-sym` can bind the entry. perlmain's
+ *                   `@main` is IR-renamed to `@real_main` and this object
+ *                   supplies plain `main`. One path for both platforms.
+ *   Off-engine Windows (mingw): -Wl,--wrap=main routes the crt's main() to
+ *                   __wrap_main; __real_main is perl's own generated main.
  */
 #include <stdlib.h>
 
@@ -29,12 +32,15 @@ static int unpin_run(int argc, char **argv, char **envp,
     return real(n, nv, envp);
 }
 
-#ifdef __APPLE__
+#ifdef UNPIN_DISPATCH_NOWRAP
+/* Engine (linux + darwin): perlmain's main() is IR-renamed to real_main; we
+ * supply the crt entry. Only the FINAL perl link pulls this object in. */
 extern int real_main(int argc, char **argv, char **envp);
 int main(int argc, char **argv, char **envp) {
     return unpin_run(argc, argv, envp, real_main);
 }
 #else
+/* Off-engine Windows (mingw): -Wl,--wrap=main. */
 extern int __real_main(int argc, char **argv, char **envp);
 int __wrap_main(int argc, char **argv, char **envp) {
     return unpin_run(argc, argv, envp, __real_main);

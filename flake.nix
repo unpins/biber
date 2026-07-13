@@ -45,7 +45,24 @@
           host = sp.stdenv.hostPlatform;
           isDarwin = host.isDarwin or false;
           prefix = sp.stdenv.cc.targetPrefix;
-          perl = sp.perl.overrideAttrs (old: {
+          perl = sp.perl.overrideAttrs (old:
+          let
+            # nixpkgs' interpreter.nix bakes an absolute `${coreutils}/bin/pwd`
+            # into Cwd.pm on EVERY cross (native uses `$(type -P pwd)`), making
+            # coreutils -- and thus gmp -- a build input of perl. On the darwin
+            # (aarch64<->x86_64) cross the engine builds that gmp, whose hand-asm
+            # ld64.lld rejects ("BRANCH relocation width 1 must be 4"). Rewrite to
+            # the native form; replaceStrings drops the text but keeps the string
+            # context, so also discard it to actually cut the coreutils edge
+            # (verified the sole context element of the cross postPatch). Native
+            # path unchanged.
+            crossBasePostPatch =
+              let b = old.postPatch or ""; in
+              if crossCompiling
+              then builtins.unsafeDiscardStringContext (builtins.replaceStrings
+                [ "'${sp.coreutils}/bin/pwd'" ] [ ''"$(type -P pwd)"'' ] b)
+              else b;
+          in {
             # On a case-insensitive FS (the darwin<->darwin cross) perl-cross's
             # configure clobbers perl's Configure, so nixpkgs' no-sys-dirs.patch
             # (which patches Configure) can't apply -- and is moot there (the
@@ -62,8 +79,45 @@
             # fixes unpins/perl applies for darwin: supply a real ranlib and
             # require the value to be the string "true".
             configureFlags = (old.configureFlags or [ ])
-              ++ lib.optionals isDarwin [ "-Dranlib=${prefix}ranlib" ];
-            postPatch = (old.postPatch or "")
+              # Engine: perl's Configure nm-scans stdenv.cc.libc's archive for libc
+              # symbols, but that is null under the engine (musl is served from
+              # clang's on-demand sysroot) -> it loops on "Where is your C library?".
+              # -Dusenm=false takes the compile-test fallback instead. Cross uses
+              # perl-cross, which never runs this scan.
+              ++ lib.optional (!crossCompiling) "-Dusenm=false"
+              # Engine: Configure probes header PRESENCE with `test -f`, but the
+              # engine cc reports its musl headers under the virtual clang-VFS
+              # sysroot (not real files) so every musl header comes back absent.
+              # Hand it a real musl of the same ABI to detect against.
+              ++ engineIncFix
+              ++ lib.optionals isDarwin [
+                "-Dranlib=${prefix}ranlib"
+                # Engine on darwin: Configure's gccversion detection misfires so it
+                # never injects -fno-strict-aliasing and the darwin hints force -O3;
+                # perl's SV/magic type-punning then miscompiles ("panic:
+                # magic_killbackrefs" loading warnings.pm). Force them explicitly.
+                "-Accflags=-fno-strict-aliasing"
+                "-Accflags=-fwrapv"
+              ];
+            preConfigure = (old.preConfigure or "")
+              # Engine cross: perl-cross probes the ELF build host for readelf/
+              # objdump, but the engine toolchain ships only the `llvm` multitool.
+              # Point the env knobs at `llvm readelf/objdump` via bcIntrospect
+              # (which lowers the bitcode objects perl-cross feeds them). Linux only
+              # (the darwin cross rewrites these probes via cross_darwin.pl below).
+              + lib.optionalString (crossCompiling && !isDarwin) ''
+                export READELF="${bcIntrospect} readelf"
+                export OBJDUMP="${bcIntrospect} objdump"
+              ''
+              # Engine darwin cross: -Accflags reaches only the TARGET perl. perl-
+              # cross builds the build-time miniperl in a separate `--mode=buildmini`
+              # respawn that takes ccflags from $HOSTCFLAGS (empty), so miniperl
+              # compiles WITHOUT -fno-strict-aliasing and segfaults on the same
+              # miscompile. Feed the flags via HOSTCFLAGS too.
+              + lib.optionalString (crossCompiling && isDarwin) ''
+                export HOSTCFLAGS="-fno-strict-aliasing -fwrapv"
+              '';
+            postPatch = crossBasePostPatch
               + lib.optionalString isDarwin ''
                 substituteInPlace installperl \
                   --replace-fail '&& $Config{useshrplib}' '&& $Config{useshrplib} eq "true"'
@@ -73,6 +127,25 @@
               # cross) rewrite those probes to compile-only, cross-safe forms.
               + lib.optionalString (crossCompiling && isDarwin) ''
                 ${bperl} ${./src/cross_darwin.pl}
+              ''
+              # Engine native: the engine cc emits musl headers under the virtual
+              # clang-VFS sysroot /__unpin_ziglib__/...; perl's makedepend records
+              # them as prerequisites and make dies "No rule to make target
+              # .../alloca.h". Drop them in makedepend_file.SH's line-marker sed.
+              + lib.optionalString (!crossCompiling) ''
+                substituteInPlace makedepend_file.SH --replace-fail \
+                  ${lib.escapeShellArg "-e '/^#.*<built-in>/d' \\"} \
+                  ${lib.escapeShellArg "-e '/^#.*<built-in>/d' -e '\\#/__unpin_ziglib__#d' \\"}
+              ''
+              # Engine cross: Errno.pm's generator scans errno.h AS A FILE to harvest
+              # E* macro names, but the engine's musl headers are virtual -> "No error
+              # definitions found". Short-circuit get_files to a stub TU the engine cc
+              # expands (`clang -E -dM` over `#include <errno.h>`). Linux cross only
+              # (native finds errno.h via engineIncFix's locincpth).
+              + lib.optionalString (crossCompiling && !isDarwin) ''
+                substituteInPlace ext/Errno/Errno_pm.PL --replace-fail \
+                  'sub get_files {' \
+                  'sub get_files { if (open(my $s, ">", "unpin_errno.c")) { print $s "#include <errno.h>\n"; close $s; return ("unpin_errno.c"); }'
               '';
             # perl-cross (the true-cross path) builds each static XS .a but its
             # `static_modules` recipe never runs pm_to_blib, so the modules' .pm
@@ -85,33 +158,23 @@
               '';
           });
           # --- platform knobs (mirror the proven spike playground/biber) ---
-          # darwin has no musl off64 hack; ld64 has no --start-group (it re-scans
-          # archives); Mach-O C symbols carry a `_` prefix; cctools has no objcopy
-          # (use llvm-objcopy). crypt.h / libcrypt / libiconv aren't on darwin's
-          # default paths but perl's recorded ccflags/ldopts reference them.
+          # darwin has no musl off64 hack. crypt.h / libcrypt / libiconv aren't on
+          # darwin's default paths but perl's recorded ccflags/ldopts reference them.
+          # (The VFS bind is IR symbol rewrite for every platform now -- no per-OS
+          # objcopy/--wrap knobs; the 32-bit _REDIR_TIME64 stat rename is an IR sed.)
           lfs = if isDarwin then "" else "-D_LARGEFILE64_SOURCE";
           cryptInc = if isDarwin then "-I${lib.getDev sp.libxcrypt}/include" else "";
+          # libxml2's encoding.c (xmlIconvConvert) references plain iconv/iconv_open/
+          # iconv_close. On darwin the STATIC libiconv archive (Apple's libiconv-113,
+          # which exports those PLAIN names -- not GNU's renamed libiconv_*) lives in
+          # the `dev` output, NOT in `getLib` (that is only the iconv CLI: bin/share).
+          # Reference the archive directly so the static plain-iconv symbols resolve.
+          # Under the engine the LTO link retains xmlIconvConvert (reachable from the
+          # encoding-handler table); pre-engine's non-LTO --gc-sections dropped it, so
+          # this latent -L-points-at-nothing bug only surfaced under the engine.
           cryptLib = if isDarwin
-            then "-L${lib.getLib sp.libxcrypt}/lib -L${lib.getLib sp.libiconv}/lib -liconv"
+            then "-L${lib.getLib sp.libxcrypt}/lib ${lib.getDev sp.libiconv}/lib/libiconv.a"
             else "";
-          objcopy = if isDarwin then "${pkgs.buildPackages.llvm}/bin/llvm-objcopy" else "$OBJCOPY";
-          usym = if isDarwin then "_" else "";   # Mach-O C-symbol underscore prefix
-          # darwin has no --wrap: rename libperl.a's open/stat to the VFS entry
-          # points by hand. x86_64-darwin carries the $INODE64 ABI suffix on
-          # stat/lstat; aarch64-darwin uses plain _stat/_lstat.
-          darwinRedef =
-            let suf = if host.isAarch64 or false then "" else "$INODE64";
-            in lib.concatStringsSep " " [
-              "--redefine-sym _open=_unpinvfs_open"
-              "--redefine-sym '_stat${suf}=_unpinvfs_stat'"
-              "--redefine-sym '_lstat${suf}=_unpinvfs_lstat'"
-              "--redefine-sym _access=_unpinvfs_access"
-            ];
-          # 32-bit musl is _REDIR_TIME64: libc renames stat/lstat to
-          # __stat_time64/__lstat_time64 in the headers, so a bare --wrap=stat
-          # never fires. The VFS wraps those names too (see src/vfs.c,
-          # guarded by -DUNPIN_WRAP_TIME64). Linux 32-bit only (i686/armv7l).
-          wrap32 = (host.parsed.cpu.bits or 64) == 32;
           # When the build host can't run the target binary (ppc64le/riscv64/
           # armv7l, windows), the codegen perl can't be the target perl. Drive
           # the Perl-side steps (Makefile.PL, xsubpp, writemain, ldopts, Config
@@ -129,6 +192,46 @@
           # whole biber Perl closure through a (failing) cross compile. For native
           # x86_64 buildPackages.biber IS pkgs.biber, so this is a no-op there.
           biber = pkgs.buildPackages.biber;
+
+          # ---- unpin-llvm engine plumbing (mirrors unpins/perl's mk) ----
+          # Under the engine sp=pkgs.pkgsStatic is the bitcode set, so every object
+          # (perl, the 19 XS, libxml2/libxslt) is LLVM bitcode and the binary is
+          # LTO-linked. perl's Configure / perl-cross introspect real headers and
+          # objects, which the engine serves virtually / as bitcode -> the same
+          # fixes unpins/perl applies. The VFS is bound by IR symbol rewrite in the
+          # relink (below), not `ld --wrap` / `objcopy --redefine-sym` (neither can
+          # touch a bitcode symtab).
+          engineMultitool = "${ulib.unpinToolchain sp.stdenv.buildPlatform.system}/bin/llvm";
+          # A real musl (same 1.2.x ABI) for perl's native Configure to scan: the
+          # engine's own musl headers live inside the clang binary's VFS, invisible
+          # to Configure's `test -f`. HOST platform, not build (an i686 target is
+          # x86_64-runnable = native, but needs 32-bit headers). Linux native only.
+          engineIncFix =
+            if crossCompiling || isDarwin then [ ]
+            else
+              let musl = (import pkgs.path { inherit (host) system; })
+                .pkgsStatic.stdenv.cc.libc;
+              in [ "-Dlocincpth=${lib.getDev musl}/include" ];
+          # perl-cross introspects target objects with readelf/objdump; under the
+          # engine those are bitcode ("not supported"). Lower a bitcode arg to a
+          # native ELF object for the triple embedded in the module before handing
+          # it to the real llvm tool; ELF args pass through. -target is mandatory
+          # (else clang lowers to the x86_64 host -> wrong sizes/endian). Cross only.
+          bcIntrospect = pkgs.buildPackages.writeShellScript "unpin-biber-bc-introspect" ''
+            mt=${engineMultitool}
+            tool=$1; shift
+            n=$#
+            obj=''${!n}
+            if [ -f "$obj" ] && [ "$(od -An -tx1 -N4 "$obj" 2>/dev/null | tr -d ' \n')" = 4243c0de ]; then
+              triple=$("$mt" opt -S "$obj" -o - 2>/dev/null \
+                | sed -n 's/^target triple = "\(.*\)"/\1/p' | head -1)
+              low=$(mktemp -d)/lowered.o
+              if [ -n "$triple" ] && "$mt" clang -target "$triple" -fno-lto -x ir -c "$obj" -o "$low" 2>/dev/null; then
+                set -- "''${@:1:$((n - 1))}" "$low"
+              fi
+            fi
+            exec "$mt" "$tool" "$@"
+          '';
 
           # The 14 pure-XS (no external C library) modules of biber's closure.
           pureXs = {
@@ -194,6 +297,55 @@
               mkdir -p work && cd work
               ALLA=""; EXTS=""
 
+              # ===== engine bitcode helpers =====
+              # Under the engine every object is LLVM bitcode, so symbol edits
+              # (the VFS bind + the utf8_strict weaken) go through the IR:
+              # `llvm opt -S | sed | llvm opt`, not objcopy / ld --wrap.
+              MT=${engineMultitool}
+              isbc() { case "$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')" in 4243c0de|dec0170b) return 0;; *) return 1;; esac; }
+              # Rename perl's libc file-op refs to the VFS shims. @sym is a FUNCTION
+              # symbol (sigil differs from %struct.stat). darwin emits raw-label
+              # imports (@"\01_stat$INODE64"); 32-bit musl renames stat->__stat_time64.
+              # Rules that don't match a given IR are no-ops.
+              vfsSed() {
+                sed -i \
+                  -e 's/@open\b/@unpinvfs_open/g' \
+                  -e 's/@stat\b/@unpinvfs_stat/g' \
+                  -e 's/@lstat\b/@unpinvfs_lstat/g' \
+                  -e 's/@access\b/@unpinvfs_access/g' \
+                  -e 's/@__stat_time64\b/@unpinvfs_stat/g' \
+                  -e 's/@__lstat_time64\b/@unpinvfs_lstat/g' \
+                  -e 's/@"\\01__stat_time64"/@unpinvfs_stat/g' \
+                  -e 's/@"\\01__lstat_time64"/@unpinvfs_lstat/g' \
+                  -e 's/@"\\01_open"/@unpinvfs_open/g' \
+                  -e 's/@"\\01_access"/@unpinvfs_access/g' \
+                  -e 's/@"\\01_stat\$INODE64"/@unpinvfs_stat/g' \
+                  -e 's/@"\\01_lstat\$INODE64"/@unpinvfs_lstat/g' \
+                  "$1"
+              }
+              bcrewrite() { $MT opt -S "$1" -o "$1.ll"; vfsSed "$1.ll"; $MT opt "$1.ll" -o "$1"; rm -f "$1.ll"; }
+              # Rewrite every bitcode member of an archive in place, then repack with
+              # the bitcode-aware llvm ar so the LTO link resolves from the index.
+              bcrewriteArchive() {
+                local a; a=$(readlink -f "$1"); local d; d=$(mktemp -d)
+                ( cd "$d" && $MT ar x "$a" )
+                for o in "$d"/*; do [ -f "$o" ] || continue; isbc "$o" && bcrewrite "$o"; done
+                rm -f "$1" && $MT ar rcs "$1" "$d"/*
+              }
+              # Engine analogue of objcopy --weaken-symbol (llvm-objcopy can't edit a
+              # bitcode symtab): prepend `weak` linkage to the matching `define`.
+              weakenArchive() {  # $1 = archive, $2 = symbol
+                local a; a=$(readlink -f "$1"); local d; d=$(mktemp -d)
+                ( cd "$d" && $MT ar x "$a" )
+                for o in "$d"/*; do
+                  [ -f "$o" ] || continue; isbc "$o" || continue
+                  $MT opt -S "$o" -o "$o.ll"
+                  sed -i -E "/@$2\(/ s/^define /define weak /" "$o.ll"
+                  $MT opt "$o.ll" -o "$o"; rm -f "$o.ll"
+                done
+                rm -f "$1" && $MT ar rcs "$1" "$d"/*
+              }
+
               # ===== (1) the 14 pure-XS via the generic loop =====
               mkdir -p pure
               echo "$PURE_XS_LIST" | while read -r name src; do
@@ -210,8 +362,9 @@
                   $PERL -I. Makefile.PL LINKTYPE=static >/dev/null
                   make -j$NIX_BUILD_CORES CC="$CC" LD="$CC" AR="$AR" OPTIMIZE="-O2" static pm_to_blib >/dev/null )
               done
-              ${objcopy} --weaken-symbol=${usym}PerlIOBase_flush_linebuf \
-                pure/PerlIOutf8_strict/blib/arch/auto/PerlIO/utf8_strict/utf8_strict.a
+              weakenArchive \
+                pure/PerlIOutf8_strict/blib/arch/auto/PerlIO/utf8_strict/utf8_strict.a \
+                PerlIOBase_flush_linebuf
               ALLA="$ALLA $(find pure -path '*/blib/arch/auto/*.a' | tr '\n' ' ')"
               EXTS="$EXTS $(find pure -path '*/blib/arch/auto/*.a' | sed -E 's|.*/blib/arch/auto/||; s|/[^/]*\.a$||' | sort -u | tr '\n' ' ')"
 
@@ -284,10 +437,17 @@
 
               # ===== VFS objects (shared unpin-vfs core: src/vfs.c + src/miniz.c,
               # github:unpins/unpin-vfs, zstd path, self-EOF mode) =====
-              $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF ${lib.optionalString wrap32 "-DUNPIN_WRAP_TIME64"} -I${./src} -c ${./src/vfs.c} -o vfs.o
-              $CC -O2 -DMINIZ_USE_ZSTD -I${./src} -c ${./src/miniz.c} -o miniz.o
-              $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I${./src} -c ${./src/unpin_zstd.c} -o unpin_zstd.o
-              $CC -O2 -c ${./src/dispatch.c} -o dispatch.o
+              # Compile from basenames copied into cwd (not from an absolute
+              # /nix/store source path): clang bakes the compiled source path into
+              # the object's debug info; an absolute arg leaks a store ref on darwin
+              # (post-embed strip can't run). NOWRAP: vfs.c defines unpinvfs_* and
+              # dispatch.c supplies plain main; the VFS is bound by the IR rewrite at
+              # relink, so no -DUNPIN_WRAP_TIME64 (the time64 rename is an IR sed).
+              cp ${./src}/*.c ${./src}/*.h .
+              $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -DUNPIN_VFS_NOWRAP -I. -c vfs.c -o vfs.o
+              $CC -O2 -DMINIZ_USE_ZSTD -I. -c miniz.c -o miniz.o
+              $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I. -c unpin_zstd.c -o unpin_zstd.o
+              $CC -O2 -DUNPIN_DISPATCH_NOWRAP -c dispatch.c -o dispatch.o
 
               # Stage the @INC: every `use lib` tree from the nixpkgs biber driver
               # (the pure-Perl deps + the XS modules' .pm) under /zip/inc/NNN, plus
@@ -347,7 +507,19 @@
               {
                 echo "#!/zip/bin/perl"
                 echo "BEGIN { @INC = ($INCEXPR); }"
-                tail -n +3 ${biber}/bin/biber
+                # Neutralise the driver's `use lib $FindBin::RealBin`: @INC is already
+                # fully pinned above and RealBin (=/zip/bin) holds no modules, so the
+                # line is dead in the onefile (the original driver used it to find a
+                # sibling lib/ on disk). It also can't run under the VFS -- FindBin
+                # resolves RealBin via Cwd::abs_path, which follows a path with
+                # getcwd/chdir/readlink and so can't resolve a VFS-only /zip path
+                # (real paths work). Left in, it yields RealBin="" -> `use lib ""`,
+                # which warns and seeds an undef @INC element (a cascade of
+                # "uninitialized $_" warnings downstream). Replace it with a no-op,
+                # preserving line numbers. Matches the driver comment's stated intent
+                # ("original use lib dropped"); the old vendored VFS fork happened to
+                # resolve /zip via a built-in dir-stat the canonical core dropped.
+                tail -n +3 ${biber}/bin/biber | sed 's|^use lib $FindBin::RealBin;.*|1;|'
               } > stage/bin/biber
 
               # Scrub /nix store paths out of EVERY staged text file: the STORED
@@ -377,25 +549,45 @@
               $PERL -MExtUtils::Miniperl -e 'writemain(@ARGV)' $COREEXTS $EXTS > perlmain.c
               $CC -O2 -c perlmain.c -I"$ARCHLIB/CORE" -o perlmain.o
               LDO="$($PERL -MExtUtils::Embed -e ldopts 2>/dev/null | sed 's/-lperl//')"
-              ${if isDarwin then ''
-                # darwin: no --wrap. dispatch.o supplies _main (rename perlmain.o's
-                # _main -> _real_main); libperl.a's open/stat are renamed to the VFS
-                # entry points. ld64 re-scans archives, so no --start-group.
-                ${objcopy} --redefine-sym _main=_real_main perlmain.o
-                cp "$ARCHLIB/CORE/libperl.a" libperl_vfs.a; chmod u+w libperl_vfs.a
-                ${objcopy} ${darwinRedef} libperl_vfs.a
-                $CC -O2 -o biber \
-                  perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o \
-                  $ALLA $COREA "$EXSLT_A" "$XSLT_A" "$XML2_A" \
-                  $LDO libperl_vfs.a -lm
-              '' else ''
-                $CC -O2 -o biber \
-                  -Wl,--wrap=open -Wl,--wrap=stat -Wl,--wrap=lstat -Wl,--wrap=access -Wl,--wrap=main \
-                  ${lib.optionalString wrap32 "-Wl,--wrap=__stat_time64 -Wl,--wrap=__lstat_time64"} \
-                  perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o \
-                  -Wl,--start-group $ALLA $COREA "$EXSLT_A" "$XSLT_A" "$XML2_A" \
-                  $LDO "$ARCHLIB/CORE/libperl.a" -Wl,--end-group -lm
-              ''}
+              # ===== VFS bind by IR rewrite (engine = all bitcode; neither
+              # `ld --wrap` nor `objcopy --redefine-sym` can bind it). Rewrite
+              # libperl.a's open/stat/lstat/access refs to the unpinvfs_* shims and
+              # perlmain's main -> real_main, then LTO-link with vfs.o (defines the
+              # shims under -DUNPIN_VFS_NOWRAP) + dispatch.o (supplies main). ONE path
+              # for Linux and darwin, replacing the old --wrap (Linux) / --redefine-sym
+              # (darwin) split. =====
+              # Rewrite libperl.a AND the core-ext archives (Cwd/List::Util). The
+              # old -Wl,--wrap was GLOBAL -- it caught every caller's open/stat/lstat,
+              # including Cwd's abs_path lstat that FindBin::RealBin uses to resolve
+              # /zip/bin. An IR rewrite of libperl.a alone leaves Cwd calling real
+              # libc -> /zip/bin "absent" -> RealBin empty -> `use lib ""` seeds an
+              # undef @INC element (the "Empty compile time value" + downstream
+              # "uninitialized $_" warnings). libperl + the core exts are read-only in
+              # the perl store, so copy them local before rewriting.
+              cp "$ARCHLIB/CORE/libperl.a" libperl_vfs.a; chmod u+w libperl_vfs.a
+              bcrewriteArchive libperl_vfs.a
+              COREA_VFS=""
+              for a in $COREA; do
+                b="vfsa_$(basename "$(dirname "$a")")_$(basename "$a")"
+                cp "$a" "$b"; chmod u+w "$b"; bcrewriteArchive "$b"
+                COREA_VFS="$COREA_VFS $b"
+              done
+              if isbc perlmain.o; then
+                $MT opt -S perlmain.o -o perlmain.ll
+                sed -i -e 's/@main\b/@real_main/g' perlmain.ll
+                $MT opt perlmain.ll -o perlmain.o
+                rm -f perlmain.ll
+              fi
+              # LTO link; bitcode is globally resolved, so no --start-group.
+              # -Wl,-u,malloc: the whole-program LTO internalizes musl's WEAK malloc
+              # alias, but sombok's linebreak_add_prep references it late -> "undefined
+              # symbol: malloc". Force-keep it (per-package analogue of nix-lib's mega
+              # bitcodeLibcForce). Linux only; darwin's libc has no such weak alias.
+              $CC -O2 -o biber \
+                ${lib.optionalString (!isDarwin) "-Wl,-u,malloc"} \
+                perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o \
+                $ALLA $COREA_VFS "$EXSLT_A" "$XSLT_A" "$XML2_A" \
+                $LDO libperl_vfs.a -lm
               runHook postBuild
             '';
             installPhase = ''
@@ -420,6 +612,14 @@
       base = ulib.mkStandaloneFlake {
         inherit self;
         name = "biber";
+        # Build via the unpin-llvm engine: pkgsStatic is swapped to the engine
+        # stdenv, so perl + the 19 hand-built XS + libxml2/libxslt all compile to
+        # LLVM bitcode and the binary is LTO-linked (whole-program opt, the same
+        # toolchain perl/curl/nmap/tcc use). The engine gates itself to native +
+        # darwin; the Linux crosses and windows (mingw) stay off-engine. The /zip
+        # @INC embed is unchanged; the VFS is bound by IR symbol rewrite in `mk`
+        # (bitcode has no `--wrap` / objcopy).
+        engine = "unpin-llvm";
         embedMan = true;
         smoke = [ "--version" ];
         smokePattern = "biber";
