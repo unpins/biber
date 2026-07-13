@@ -128,13 +128,6 @@ extern const unsigned char UVFS_CAT(_binary_, UVFS_CAT(UNPIN_VFS_BLOB_SYM, _end)
 #define VFS_ROOT_LEN (sizeof(VFS_ROOT) - 1)
 #define ZDICT_ENTRY  ".unpin/zdict"
 
-/* TEST: an extra unpin_vfs_stat call during init MASKS the aarch64-darwin
- * 'Can't locate' — classic sign of a whole-program-LTO miscompile of THIS TU
- * (miniz optnone did not help). Pin every vfs.c function at -O0 through LTO. */
-#if defined(__clang__)
-#pragma clang optimize off
-#endif
-
 /* ---- shared miniz core ------------------------------------------------- */
 
 static mz_zip_archive g_zip;
@@ -155,6 +148,15 @@ int unpin_vfs_init(void) {
     g_state = (self && mz_zip_reader_init_cfile(&g_zip, self, self_size, 0)) ? 1 : 2;
     if (g_state != 1 && self) fclose(self);
     /* On success `self` is owned by g_zip for the process lifetime. */
+    /* TEST(unconditional prime): calling the shims for a /zip path during init
+     * made aarch64-darwin --version succeed where the plain smoke fails. Confirm
+     * without the debug env by priming here always. */
+    if (g_state == 1) {
+        struct stat _pst;
+        (void)unpin_vfs_stat("/zip/inc/perl/strict.pm", &_pst);
+        int _pfd = unpin_vfs_open("/zip/inc/perl/strict.pm", O_RDONLY);
+        (void)_pfd;
+    }
     if (getenv("UNPIN_VFS_DEBUG"))
         fprintf(stderr, "UNPINVFS_DBG self_size=%llu state=%d\n",
                 (unsigned long long)self_size, g_state);
