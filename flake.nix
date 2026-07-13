@@ -669,19 +669,15 @@
       # into the BUILD log, which is NOT swallowed. Non-fatal.
       diagDarwin = drv: drv.overrideAttrs (old: {
         buildCommand = (old.buildCommand or "") + ''
+          set +e
           echo "===UNPIN-DARWIN-DIAG-START==="
-          echo "===UNPIN-ZIP inc/perl count: $(unzip -l "$out/bin/biber" 2>/dev/null | grep -cE ' inc/perl/')==="
-          echo "===UNPIN-ZIP strict.pm: $(unzip -l "$out/bin/biber" 2>/dev/null | grep -E ' inc/perl/strict\.pm' | head -1)==="
           echo "===UNPIN-ZIP total: $(unzip -l "$out/bin/biber" 2>/dev/null | tail -1)==="
-          echo "===UNPIN-ZIP-EXTRACT strict.pm head (real content => ZIP offsets ok; garbage/err => malformed):==="
-          unzip -p "$out/bin/biber" inc/perl/strict.pm 2>&1 | head -3
-          echo "===UNPIN-ZIP-EXTRACT-END==="
-          if "$out/bin/biber" --version 2>&1; then
-            echo "===UNPIN-DARWIN-DIAG: exit 0==="
-          else
-            echo "===UNPIN-DARWIN-DIAG: exit=$?==="
-          fi
+          __strict="$(unzip -p "$out/bin/biber" inc/perl/strict.pm 2>&1)"; __rc=$?
+          echo "===UNPIN-ZIP-EXTRACT rc=$__rc bytes=''${#__strict} head=[''${__strict:0:70}]==="
+          __ver="$("$out/bin/biber" --version 2>&1)"; __vrc=$?
+          echo "===UNPIN-DARWIN-DIAG version rc=$__vrc out=[''${__ver:0:200}]==="
           echo "===UNPIN-DARWIN-DIAG-END==="
+          set -e
         '';
       });
     in
