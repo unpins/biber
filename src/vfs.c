@@ -160,8 +160,20 @@ static void unpin_trace(const char *fmt, ...) {
     close(fd);
 }
 #define UNPIN_TRACE(...) unpin_trace(__VA_ARGS__)
+/* Log the raw path at each file-op shim: the first N calls (startup sequence)
+ * plus anything mentioning strict/.pm, so we see whether perl's strict.pm probe
+ * reaches these shims at all and via which entry point / what raw path. */
+static int g_trace_n;
+static void unpin_trace_op(const char *fn, const char *path) {
+    if (!path) return;
+    if (g_trace_n < 80 || strstr(path, "strict") || strstr(path, ".pm"))
+        unpin_trace("OP#%d %s %s\n", g_trace_n, fn, path);
+    g_trace_n++;
+}
+#define UNPIN_TRACE_OP(fn, path) unpin_trace_op((fn), (path))
 #else
 #define UNPIN_TRACE(...) ((void)0)
+#define UNPIN_TRACE_OP(fn, path) ((void)0)
 #endif
 
 int unpin_vfs_init(void) {
@@ -730,17 +742,6 @@ static int fill_dir_stat(struct stat *st) {
 /* Virtual-path handlers shared by the wrap shims and the explicit API. */
 static int vfs_open_virtual(const char *key) {
     int i = vfs_find(key);
-#ifdef UNPIN_VFS_FILETRACE
-    if (strstr(key, "strict.pm")) {
-        if (i >= 0) {
-            int fd = fd_for(i);
-            UNPIN_TRACE("openv strict key=%s idx=%d fd=%d sz=%llu\n",
-                        key, i, fd, (unsigned long long)entry_size(i));
-            return fd;
-        }
-        UNPIN_TRACE("openv strict MISS key=%s locate=%d\n", key, i);
-    }
-#endif
     if (i >= 0) return fd_for(i);
     errno = ENOENT; return -1;
 }
@@ -757,16 +758,13 @@ static int vfs_stat_virtual(const char *key, struct stat *st) {
     errno = ENOENT; return -1;
 #else
     int i = vfs_find(key);
-#ifdef UNPIN_VFS_FILETRACE
-    if (strstr(key, "strict.pm"))
-        UNPIN_TRACE("statv strict key=%s locate=%d\n", key, i);
-#endif
     if (i >= 0) return fill_stat(st, entry_size(i));
     errno = ENOENT; return -1;
 #endif
 }
 
 int OPEN_FN(const char *path, int flags, ...) {
+    UNPIN_TRACE_OP("open", path);
     const char *key = posix_key(path);
     if (key) return vfs_open_virtual(key);
     if ((flags & O_CREAT)
@@ -783,18 +781,21 @@ int OPEN_FN(const char *path, int flags, ...) {
 }
 
 int STAT_FN(const char *path, struct stat *st) {
+    UNPIN_TRACE_OP("stat", path);
     const char *key = posix_key(path);
     if (key) return vfs_stat_virtual(key, st);
     return REAL_STAT(path, st);
 }
 
 int LSTAT_FN(const char *path, struct stat *st) {
+    UNPIN_TRACE_OP("lstat", path);
     const char *key = posix_key(path);
     if (key) return vfs_stat_virtual(key, st);
     return REAL_LSTAT(path, st);
 }
 
 int ACCESS_FN(const char *path, int mode) {
+    UNPIN_TRACE_OP("access", path);
     const char *key = posix_key(path);
     if (key) return vfs_find(key) >= 0 ? 0 : (errno = ENOENT, -1);
     return REAL_ACCESS(path, mode);

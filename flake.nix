@@ -664,7 +664,7 @@
           echo "===UNPIN-TRACE-START==="
           TF="$NIX_BUILD_TOP/unpin_trace.txt"; rm -f "$TF"
           O="$(UNPIN_TRACE_FILE="$TF" "$B" --version 2>&1)"; echo "traced rc=$? out=[''${O: -100}]"
-          echo "--- trace file ---"; cat "$TF" 2>/dev/null; echo "--- end trace ---"
+          echo "--- trace file (head 200) ---"; head -200 "$TF" 2>/dev/null; echo "--- end trace ($(wc -l < "$TF" 2>/dev/null) lines) ---"
           echo "===UNPIN-TRACE-END==="
           set -e
         '';
