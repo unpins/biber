@@ -1,4 +1,10 @@
 #include "miniz.h"
+/* TEST: is the aarch64-darwin 'Can't locate' a whole-program-LTO miscompile of
+ * miniz's ZIP central-directory reader? optnone survives LTO (unlike -O0 at
+ * compile), so this pins every miniz function at -O0 through the link. */
+#if defined(__clang__)
+#pragma clang optimize off
+#endif
 /**************************************************************************
  *
  * Copyright 2013-2014 RAD Game Tools and Valve Software

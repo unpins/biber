@@ -145,7 +145,7 @@ int unpin_vfs_init(void) {
 #ifdef UNPIN_VFS_SELF
     mz_uint64 self_size = 0;
     FILE *self = self_open(&self_size);
-    g_state = (self && mz_zip_reader_init_cfile(&g_zip, self, self_size, MZ_ZIP_FLAG_DO_NOT_SORT_CENTRAL_DIRECTORY)) ? 1 : 2;
+    g_state = (self && mz_zip_reader_init_cfile(&g_zip, self, self_size, 0)) ? 1 : 2;
     if (g_state != 1 && self) fclose(self);
     /* On success `self` is owned by g_zip for the process lifetime. */
 #else
