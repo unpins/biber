@@ -483,6 +483,13 @@
               # core .pm like Cwd/Config live under the <arch> subdir).
               mkdir -p stage/inc/perl
               cp -rL "$PRIVLIB"/. stage/inc/perl/
+              ${lib.optionalString isDarwin ''
+                echo "===UNPIN-STAGE-DIAG PRIVLIB=[$PRIVLIB]==="
+                echo "===UNPIN-STAGE-DIAG PRIVLIB exists: $([ -d "$PRIVLIB" ] && echo yes || echo no)==="
+                echo "===UNPIN-STAGE-DIAG stage/inc/perl .pm count: $(find stage/inc/perl -name '*.pm' 2>/dev/null | wc -l)==="
+                echo "===UNPIN-STAGE-DIAG strict.pm present: $([ -e stage/inc/perl/strict.pm ] && echo yes || echo no)==="
+                echo "===UNPIN-STAGE-DIAG ARCHLIB=[$ARCHLIB]==="
+              ''}
               ARCHB=$(basename "$ARCHLIB")
               ${lib.optionalString crossCompiling ''
                 # perl-cross's -Uusedl build omits a few core .pm that the static
