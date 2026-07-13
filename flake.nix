@@ -305,8 +305,16 @@
               isbc() { case "$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')" in 4243c0de|dec0170b) return 0;; *) return 1;; esac; }
               # Rename perl's libc file-op refs to the VFS shims. @sym is a FUNCTION
               # symbol (sigil differs from %struct.stat). darwin emits raw-label
-              # imports (@"\01_stat$INODE64"); 32-bit musl renames stat->__stat_time64.
-              # Rules that don't match a given IR are no-ops.
+              # imports; 32-bit musl renames stat->__stat_time64. Rules that don't
+              # match a given IR are no-ops.
+              #
+              # The darwin stat/lstat spelling is ARCH-SPECIFIC: x86_64 carries the
+              # legacy inode32 ABI so <sys/stat.h> asm-aliases stat -> _stat$INODE64,
+              # but arm64 was inode64 from day one (no such suffix), so the alias is
+              # the PLAIN _stat. open/access have the same plain raw label on both
+              # arches. Miss the plain _stat/_lstat and perl's require stat()s the
+              # real FS for /zip modules -> ENOENT -> "Can't locate strict.pm" on
+              # arm64-darwin only (x86_64-darwin matched via the $INODE64 rule).
               vfsSed() {
                 sed -i \
                   -e 's/@open\b/@unpinvfs_open/g' \
@@ -319,6 +327,8 @@
                   -e 's/@"\\01__lstat_time64"/@unpinvfs_lstat/g' \
                   -e 's/@"\\01_open"/@unpinvfs_open/g' \
                   -e 's/@"\\01_access"/@unpinvfs_access/g' \
+                  -e 's/@"\\01_stat"/@unpinvfs_stat/g' \
+                  -e 's/@"\\01_lstat"/@unpinvfs_lstat/g' \
                   -e 's/@"\\01_stat\$INODE64"/@unpinvfs_stat/g' \
                   -e 's/@"\\01_lstat\$INODE64"/@unpinvfs_lstat/g' \
                   "$1"
@@ -664,15 +674,7 @@
           echo "===UNPIN-TRACE-START==="
           TF="$NIX_BUILD_TOP/unpin_trace.txt"; rm -f "$TF"
           O="$(UNPIN_TRACE_FILE="$TF" "$B" --version 2>&1)"; echo "traced rc=$? out=[''${O: -100}]"
-          echo "--- trace file (head 200) ---"; head -200 "$TF" 2>/dev/null; echo "--- end trace ($(wc -l < "$TF" 2>/dev/null) lines) ---"
-          # The binary is stripped, so nm shows nothing; dynamic imports survive
-          # stripping — read them via otool -Iv / dyld_info. A leaked file-op
-          # import (perl using a variant vfsSed never rewrote) shows up here.
-          echo "--- dyld imports (file-op-ish) via otool -Iv ---"
-          otool -Iv "$B" 2>/dev/null | grep -aiE 'open|stat|access|getattr|dirent|readlink|realpath|fcntl|nocancel|inode|lstat|fopen' | sort -u | head -60
-          echo "--- dyld_info -imports (fallback) ---"
-          { xcrun dyld_info -imports "$B" 2>/dev/null || dyld_info -imports "$B" 2>/dev/null; } | grep -aiE 'open|stat|access|getattr|dirent|readlink|realpath|nocancel|inode|lstat|fopen' | sort -u | head -60
-          echo "--- imports END ---"
+          echo "--- trace file (head 60) ---"; head -60 "$TF" 2>/dev/null; echo "--- end trace ($(wc -l < "$TF" 2>/dev/null) lines) ---"
           echo "===UNPIN-TRACE-END==="
           set -e
         '';
