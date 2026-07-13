@@ -44,6 +44,7 @@
           # for the arches that linked before.
           host = sp.stdenv.hostPlatform;
           isDarwin = host.isDarwin or false;
+          isArmDarwin = isDarwin && (host.isAarch64 or false);
           prefix = sp.stdenv.cc.targetPrefix;
           perl = sp.perl.overrideAttrs (old:
           let
@@ -446,7 +447,11 @@
               cp ${./src}/*.c ${./src}/*.h .
               $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -DUNPIN_VFS_NOWRAP -I. -c vfs.c -o vfs.o
               $CC -O2 -DMINIZ_USE_ZSTD -I. -c miniz.c -o miniz.o
-              $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I. -c unpin_zstd.c -o unpin_zstd.o
+              # TEST(aarch64-darwin): `open` (decompress) fails while `stat` (no
+              # decompress) works — isolate a suspected clang-21 whole-program-LTO
+              # miscompile of the vendored zstd decoder by compiling this TU
+              # LTO-opaque (native -O2 object, immune to the final LTO codegen).
+              $CC -O2 ${lib.optionalString isArmDarwin "-fno-lto"} -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I. -c unpin_zstd.c -o unpin_zstd.o
               $CC -O2 -DUNPIN_DISPATCH_NOWRAP -c dispatch.c -o dispatch.o
 
               # Stage the @INC: every `use lib` tree from the nixpkgs biber driver
@@ -649,51 +654,6 @@
         };
       };
       winMod = import ./windows.nix { inherit ulib; };
-      # TEMP DIAGNOSTIC (remove after the aarch64-darwin memory bug is found):
-      # the aarch64-darwin smoke fails "Can't locate strict.pm" — a layout-
-      # sensitive memory-safety bug (Heisenbug: setting any env flips it), NOT a
-      # miscompile (VFS optnone / -fno-strict-aliasing / DO_NOT_SORT all failed).
-      # Run a guard-malloc battery on the FULLY EMBEDDED binary at the tail of
-      # the embed runCommand (executes on the aarch64 runner) and echo into the
-      # BUILD log (the CI smoke step hides a non-zero run under `set -e`). macOS
-      # ships these in-process allocator checks + libgmalloc, so no rebuild is
-      # needed to turn a silent heap overwrite into a diagnosed abort. Non-fatal.
-      diagDarwin = drv: drv.overrideAttrs (old: {
-        buildCommand = (old.buildCommand or "") + ''
-          set +e
-          B="$out/bin/biber"
-          echo "===UNPIN-DARWIN-DIAG-START==="
-
-          # Control: reproduce the plain smoke (no extra env). Expect rc=2 and
-          # "Can't locate strict.pm"; if THIS passes, the sandbox env differs
-          # from the CI smoke env and the rest is moot.
-          echo "===DIAG baseline==="
-          O="$("$B" --version 2>&1)"; echo "rc=$? out=[''${O: -300}]"
-
-          # Uninitialised-read + edge probe: PreScribble fills fresh mallocs with
-          # 0xAA (garbage becomes deterministic), GuardEdges puts guard pages on
-          # large allocations. A flip vs baseline localises to the heap.
-          echo "===DIAG scribble+guardedges==="
-          O="$(MallocPreScribble=1 MallocScribble=1 MallocGuardEdges=1 "$B" --version 2>&1)"; echo "rc=$? out=[''${O: -300}]"
-
-          # Heap-integrity walk: scan the whole heap every N mallocs; a corrupted
-          # block aborts with "malloc: heap corrupted" naming the bad allocation.
-          echo "===DIAG checkheap==="
-          O="$(MallocCheckHeapStart=1 MallocCheckHeapEach=200 MallocErrorAbort=1 "$B" --version 2>&1)"; echo "rc=$? out=[''${O: -800}]"
-
-          # Guard Malloc: each allocation on its own page + guard page, so an
-          # out-of-bounds access faults AT the instruction. Overflow (guard after)
-          # and underflow (MALLOC_PROTECT_BEFORE) + fill uninit space with a
-          # pattern that faults if dereferenced as a pointer.
-          echo "===DIAG libgmalloc-overflow==="
-          O="$(DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib MALLOC_FILL_SPACE=1 "$B" --version 2>&1)"; echo "rc=$? out=[''${O: -800}]"
-          echo "===DIAG libgmalloc-underflow==="
-          O="$(DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib MALLOC_PROTECT_BEFORE=1 MALLOC_FILL_SPACE=1 "$B" --version 2>&1)"; echo "rc=$? out=[''${O: -800}]"
-
-          echo "===UNPIN-DARWIN-DIAG-END==="
-          set -e
-        '';
-      });
     in
     # Ship: x86_64/aarch64-linux (native) + the four cross-linux arches
     # (i686/ppc64le/riscv64/armv7l, via the build-host-perl codegen flow) +
@@ -702,11 +662,5 @@
     # redefs). CI has no x86_64-darwin runner, so that cross attr is the
     # ONLY path to an Intel macOS release asset; the native x86_64-darwin
     # output only ever builds locally.
-    base // {
-      packages = base.packages // {
-        aarch64-darwin = base.packages.aarch64-darwin // {
-          default = diagDarwin base.packages.aarch64-darwin.default;
-        };
-      };
-    };
+    base;
 }
