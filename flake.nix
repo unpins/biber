@@ -649,6 +649,23 @@
         };
       };
       winMod = import ./windows.nix { inherit ulib; };
+      # TEMP DIAGNOSTIC (remove after darwin smoke is diagnosed): the CI smoke
+      # step captures `biber --version` under `set -e`, so a non-zero run hides
+      # its message. Run the FULLY EMBEDDED binary at the tail of the embed
+      # runCommand (native aarch64-darwin executes on the aarch64 runner; the
+      # darwin-x86_64 cross runs under Rosetta on macos-14) and echo the output
+      # into the BUILD log, which is NOT swallowed. Non-fatal.
+      diagDarwin = drv: drv.overrideAttrs (old: {
+        buildCommand = (old.buildCommand or "") + ''
+          echo "===UNPIN-DARWIN-DIAG-START==="
+          if "$out/bin/biber" --version 2>&1; then
+            echo "===UNPIN-DARWIN-DIAG: exit 0==="
+          else
+            echo "===UNPIN-DARWIN-DIAG: exit=$?==="
+          fi
+          echo "===UNPIN-DARWIN-DIAG-END==="
+        '';
+      });
     in
     # Ship: x86_64/aarch64-linux (native) + the four cross-linux arches
     # (i686/ppc64le/riscv64/armv7l, via the build-host-perl codegen flow) +
@@ -657,5 +674,12 @@
     # redefs). CI has no x86_64-darwin runner, so that cross attr is the
     # ONLY path to an Intel macOS release asset; the native x86_64-darwin
     # output only ever builds locally.
-    base;
+    base // {
+      packages = base.packages // {
+        aarch64-darwin = base.packages.aarch64-darwin // {
+          default = diagDarwin base.packages.aarch64-darwin.default;
+          "darwin-x86_64" = diagDarwin base.packages.aarch64-darwin."darwin-x86_64";
+        };
+      };
+    };
 }
