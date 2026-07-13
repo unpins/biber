@@ -148,13 +148,17 @@ int unpin_vfs_init(void) {
     g_state = (self && mz_zip_reader_init_cfile(&g_zip, self, self_size, 0)) ? 1 : 2;
     if (g_state != 1 && self) fclose(self);
     /* On success `self` is owned by g_zip for the process lifetime. */
-    if (getenv("UNPIN_VFS_DEBUG"))
+    if (getenv("UNPIN_VFS_DEBUG")) {
+        struct stat dst;
+        int wstat = (g_state == 1) ? unpin_vfs_stat("/zip/inc/perl/strict.pm", &dst) : -99;
+        int wsfd  = (g_state == 1) ? unpin_vfs_open("/zip/inc/perl/strict.pm", O_RDONLY) : -99;
         fprintf(stderr,
-            "UNPINVFS_DBG self_size=%llu state=%d err=%d num_files=%u locate_strict=%d locate_binbiber=%d\n",
-            (unsigned long long)self_size, g_state, (int)mz_zip_get_last_error(&g_zip),
+            "UNPINVFS_DBG self_size=%llu state=%d num_files=%u locate_strict=%d wrap_stat=%d wrap_open=%d\n",
+            (unsigned long long)self_size, g_state,
             g_state == 1 ? mz_zip_reader_get_num_files(&g_zip) : 0,
             g_state == 1 ? mz_zip_reader_locate_file(&g_zip, "inc/perl/strict.pm", NULL, 0) : -99,
-            g_state == 1 ? mz_zip_reader_locate_file(&g_zip, "bin/biber", NULL, 0) : -99);
+            wstat, wsfd >= 0 ? 1 : wsfd);
+    }
 #else
     size_t size = (size_t)(BLOB_END - BLOB_BEG);
     g_state = mz_zip_reader_init_mem(&g_zip, BLOB_BEG, size, 0) ? 1 : 2;

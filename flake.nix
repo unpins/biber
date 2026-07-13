@@ -676,6 +676,9 @@
           echo "===UNPIN-ZIP-EXTRACT rc=$__rc bytes=''${#__strict} head=[''${__strict:0:70}]==="
           __ver="$(UNPIN_VFS_DEBUG=1 "$out/bin/biber" --version 2>&1)"; __vrc=$?
           echo "===UNPIN-DARWIN-DIAG version rc=$__vrc out=[''${__ver:0:320}]==="
+          echo "===UNPIN-NM file-op imports (U = calls real libc, not the VFS shim):==="
+          nm "$out/bin/biber" 2>/dev/null | grep -E ' U _(stat|lstat|open|access|fstatat|stat64|getattrlist)' | sort -u | head -30
+          echo "===UNPIN-NM-END==="
           echo "===UNPIN-DARWIN-DIAG-END==="
           set -e
         '';
