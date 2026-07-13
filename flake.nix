@@ -665,6 +665,11 @@
           TF="$NIX_BUILD_TOP/unpin_trace.txt"; rm -f "$TF"
           O="$(UNPIN_TRACE_FILE="$TF" "$B" --version 2>&1)"; echo "traced rc=$? out=[''${O: -100}]"
           echo "--- trace file (head 200) ---"; head -200 "$TF" 2>/dev/null; echo "--- end trace ($(wc -l < "$TF" 2>/dev/null) lines) ---"
+          echo "--- undefined libc imports (file-op-ish: a leak => perl uses a non-rewritten variant) ---"
+          nm -u "$B" 2>/dev/null | grep -aiE 'open|stat|access|getattr|dirent|readlink|realpath|fcntl|nocancel|inode|lstat' | sort -u
+          echo "--- unpinvfs_* defined symbols ---"
+          nm "$B" 2>/dev/null | grep -aiE 'unpinvfs_' | sort -u
+          echo "--- imports END ---"
           echo "===UNPIN-TRACE-END==="
           set -e
         '';
