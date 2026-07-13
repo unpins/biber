@@ -568,7 +568,13 @@
               bcrewriteArchive libperl_vfs.a
               COREA_VFS=""
               for a in $COREA; do
-                b="vfsa_$(basename "$(dirname "$a")")_$(basename "$a")"
+                # Name by the FULL auto-relative path: parent-dir+basename alone
+                # collides (auto/Hash/Util/Util.a and auto/List/Util/Util.a both
+                # -> vfsa_Util_Util.a), so the second clobbers the first and its
+                # boot_<ext> goes undefined. Native builds masked it (ExtUtils::
+                # Embed ldopts re-supplied the loser); cross drops List::Util from
+                # ldopts, so whichever the readdir order clobbered stayed dead.
+                b="vfsa_$(echo "''${a#$ARCHLIB/auto/}" | tr / _)"
                 cp "$a" "$b"; chmod u+w "$b"; bcrewriteArchive "$b"
                 COREA_VFS="$COREA_VFS $b"
               done
