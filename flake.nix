@@ -106,8 +106,8 @@
               # (which lowers the bitcode objects perl-cross feeds them). Linux only
               # (the darwin cross rewrites these probes via cross_darwin.pl below).
               + lib.optionalString (crossCompiling && !isDarwin) ''
-                export READELF="${bcIntrospect} readelf"
-                export OBJDUMP="${bcIntrospect} objdump"
+                export READELF="${ep.bcIntrospect} readelf"
+                export OBJDUMP="${ep.bcIntrospect} objdump"
               ''
               # Engine darwin cross: -Accflags reaches only the TARGET perl. perl-
               # cross builds the build-time miniperl in a separate `--mode=buildmini`
@@ -193,15 +193,22 @@
           # x86_64 buildPackages.biber IS pkgs.biber, so this is a no-op there.
           biber = pkgs.buildPackages.biber;
 
-          # ---- unpin-llvm engine plumbing (mirrors unpins/perl's mk) ----
+          # ---- unpin-llvm engine plumbing (shared from nix-lib) ----
           # Under the engine sp=pkgs.pkgsStatic is the bitcode set, so every object
           # (perl, the 19 XS, libxml2/libxslt) is LLVM bitcode and the binary is
           # LTO-linked. perl's Configure / perl-cross introspect real headers and
           # objects, which the engine serves virtually / as bitcode -> the same
           # fixes unpins/perl applies. The VFS is bound by IR symbol rewrite in the
           # relink (below), not `ld --wrap` / `objcopy --redefine-sym` (neither can
-          # touch a bitcode symtab).
-          engineMultitool = "${ulib.unpinToolchain sp.stdenv.buildPlatform.system}/bin/llvm";
+          # touch a bitcode symtab). `ep` = the `llvm` multitool, the perl-cross
+          # bitcode-introspection helper, and the VFS IR-rewrite shell fns
+          # (vfsSed & co) — same source unpins/perl uses, so the fix-prone vfsSed
+          # can't drift between the two.
+          ep = ulib.enginePerl {
+            inherit pkgs;
+            introspectName = "unpin-biber-bc-introspect";
+          };
+          engineMultitool = ep.multitool;
           # A real musl (same 1.2.x ABI) for perl's native Configure to scan: the
           # engine's own musl headers live inside the clang binary's VFS, invisible
           # to Configure's `test -f`. HOST platform, not build (an i686 target is
@@ -212,26 +219,6 @@
               let musl = (import pkgs.path { inherit (host) system; })
                 .pkgsStatic.stdenv.cc.libc;
               in [ "-Dlocincpth=${lib.getDev musl}/include" ];
-          # perl-cross introspects target objects with readelf/objdump; under the
-          # engine those are bitcode ("not supported"). Lower a bitcode arg to a
-          # native ELF object for the triple embedded in the module before handing
-          # it to the real llvm tool; ELF args pass through. -target is mandatory
-          # (else clang lowers to the x86_64 host -> wrong sizes/endian). Cross only.
-          bcIntrospect = pkgs.buildPackages.writeShellScript "unpin-biber-bc-introspect" ''
-            mt=${engineMultitool}
-            tool=$1; shift
-            n=$#
-            obj=''${!n}
-            if [ -f "$obj" ] && [ "$(od -An -tx1 -N4 "$obj" 2>/dev/null | tr -d ' \n')" = 4243c0de ]; then
-              triple=$("$mt" opt -S "$obj" -o - 2>/dev/null \
-                | sed -n 's/^target triple = "\(.*\)"/\1/p' | head -1)
-              low=$(mktemp -d)/lowered.o
-              if [ -n "$triple" ] && "$mt" clang -target "$triple" -fno-lto -x ir -c "$obj" -o "$low" 2>/dev/null; then
-                set -- "''${@:1:$((n - 1))}" "$low"
-              fi
-            fi
-            exec "$mt" "$tool" "$@"
-          '';
 
           # The 14 pure-XS (no external C library) modules of biber's closure.
           pureXs = {
@@ -302,59 +289,12 @@
               # (the VFS bind + the utf8_strict weaken) go through the IR:
               # `llvm opt -S | sed | llvm opt`, not objcopy / ld --wrap.
               MT=${engineMultitool}
-              isbc() { case "$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')" in 4243c0de|dec0170b) return 0;; *) return 1;; esac; }
-              # Rename perl's libc file-op refs to the VFS shims. @sym is a FUNCTION
-              # symbol (sigil differs from %struct.stat). darwin emits raw-label
-              # imports; 32-bit musl renames stat->__stat_time64. Rules that don't
-              # match a given IR are no-ops.
-              #
-              # The darwin stat/lstat spelling is ARCH-SPECIFIC: x86_64 carries the
-              # legacy inode32 ABI so <sys/stat.h> asm-aliases stat -> _stat$INODE64,
-              # but arm64 was inode64 from day one (no such suffix), so the alias is
-              # the PLAIN _stat. open/access have the same plain raw label on both
-              # arches. Miss the plain _stat/_lstat and perl's require stat()s the
-              # real FS for /zip modules -> ENOENT -> "Can't locate strict.pm" on
-              # arm64-darwin only (x86_64-darwin matched via the $INODE64 rule).
-              vfsSed() {
-                sed -i \
-                  -e 's/@open\b/@unpinvfs_open/g' \
-                  -e 's/@stat\b/@unpinvfs_stat/g' \
-                  -e 's/@lstat\b/@unpinvfs_lstat/g' \
-                  -e 's/@access\b/@unpinvfs_access/g' \
-                  -e 's/@__stat_time64\b/@unpinvfs_stat/g' \
-                  -e 's/@__lstat_time64\b/@unpinvfs_lstat/g' \
-                  -e 's/@"\\01__stat_time64"/@unpinvfs_stat/g' \
-                  -e 's/@"\\01__lstat_time64"/@unpinvfs_lstat/g' \
-                  -e 's/@"\\01_open"/@unpinvfs_open/g' \
-                  -e 's/@"\\01_access"/@unpinvfs_access/g' \
-                  -e 's/@"\\01_stat"/@unpinvfs_stat/g' \
-                  -e 's/@"\\01_lstat"/@unpinvfs_lstat/g' \
-                  -e 's/@"\\01_stat\$INODE64"/@unpinvfs_stat/g' \
-                  -e 's/@"\\01_lstat\$INODE64"/@unpinvfs_lstat/g' \
-                  "$1"
-              }
-              bcrewrite() { $MT opt -S "$1" -o "$1.ll"; vfsSed "$1.ll"; $MT opt "$1.ll" -o "$1"; rm -f "$1.ll"; }
-              # Rewrite every bitcode member of an archive in place, then repack with
-              # the bitcode-aware llvm ar so the LTO link resolves from the index.
-              bcrewriteArchive() {
-                local a; a=$(readlink -f "$1"); local d; d=$(mktemp -d)
-                ( cd "$d" && $MT ar x "$a" )
-                for o in "$d"/*; do [ -f "$o" ] || continue; isbc "$o" && bcrewrite "$o"; done
-                rm -f "$1" && $MT ar rcs "$1" "$d"/*
-              }
-              # Engine analogue of objcopy --weaken-symbol (llvm-objcopy can't edit a
-              # bitcode symtab): prepend `weak` linkage to the matching `define`.
-              weakenArchive() {  # $1 = archive, $2 = symbol
-                local a; a=$(readlink -f "$1"); local d; d=$(mktemp -d)
-                ( cd "$d" && $MT ar x "$a" )
-                for o in "$d"/*; do
-                  [ -f "$o" ] || continue; isbc "$o" || continue
-                  $MT opt -S "$o" -o "$o.ll"
-                  sed -i -E "/@$2\(/ s/^define /define weak /" "$o.ll"
-                  $MT opt "$o.ll" -o "$o"; rm -f "$o.ll"
-                done
-                rm -f "$1" && $MT ar rcs "$1" "$d"/*
-              }
+              # isbc + vfsSed + bcrewrite (IR VFS-rewrite core, incl. the arch-
+              # specific darwin stat/lstat rules) + the archive variants
+              # (bcrewriteArchive/weakenArchive) — all shared from nix-lib, so the
+              # fix-prone vfsSed is one source with unpins/perl.
+              ${ep.vfsShellFns}
+              ${ep.vfsArchiveFns}
 
               # ===== (1) the 14 pure-XS via the generic loop =====
               mkdir -p pure
