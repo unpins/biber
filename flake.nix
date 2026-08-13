@@ -578,7 +578,18 @@
         engine = "unpin-llvm";
         embedMan = true;
         smoke = [ "--version" ];
-        smokePattern = "biber";
+        # Anchored on the version line, not the bare program name: the smoke step
+        # greps combined stdout+stderr, and every message biber can fail with
+        # already contains "biber". `--version` is the right smoke here because it
+        # is not free — biber loads modules out of the embedded @INC to print it,
+        # so the VFS is exercised.
+        smokePattern = "^biber version: 2\\.";
+        # The binary bakes perl's compiled-in @INC (four lib/perl5 dirs under the
+        # static perl) and libxml2's default etc/xml/catalog. All five are dead:
+        # main pins @INC to the /zip tree and none of the paths ship. Nix still
+        # counts them as runtime refs, and those two drag 174.8 MB of closure
+        # behind a 32 MB binary.
+        removeReferences = [ "perl-static" "libxml2-static" ];
         build = pkgs: mk pkgs;
         # Windows is mingw-NATIVE (not cosmo): nixpkgs' perl-cross only gets
         # part-way, so windows.nix runs winfix-spike.sh (postConfigure) to make a
