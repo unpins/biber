@@ -287,9 +287,9 @@ let
     ALLA="$ALLA params/PV_XS.a"; EXTS="$EXTS Params/Validate/XS"
 
     # ===== VFS objects + dispatch (shared unpin-vfs core, zstd, self-EOF) =====
-    $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -I${./src} -c ${./src/vfs.c} -o vfs.o
-    $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -I${./src} -c ${./src/miniz.c} -o miniz.o
-    $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I${./src} -c ${./src/unpin_zstd.c} -o unpin_zstd.o
+    $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -I${ulib.vfsCore} -c ${ulib.vfsCore}/vfs.c -o vfs.o
+    $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -I${ulib.vfsCore} -c ${ulib.vfsCore}/miniz.c -o miniz.o
+    $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I${ulib.vfsCore} -c ${ulib.vfsCore}/unpin_zstd.c -o unpin_zstd.o
     $CC -O2 -std=gnu17 -c ${./src/dispatch.c} -o dispatch.o
 
     # Stage @INC: every `use lib` tree from the build-host biber driver under

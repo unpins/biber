@@ -393,7 +393,7 @@
               # (post-embed strip can't run). NOWRAP: vfs.c defines unpinvfs_* and
               # dispatch.c supplies plain main; the VFS is bound by the IR rewrite at
               # relink, so no -DUNPIN_WRAP_TIME64 (the time64 rename is an IR sed).
-              cp ${./src}/*.c ${./src}/*.h .
+              cp ${ulib.vfsCore}/*.c ${ulib.vfsCore}/*.h ${./src}/dispatch.c .
               $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -DUNPIN_VFS_NOWRAP -I. -c vfs.c -o vfs.o
               $CC -O2 -DMINIZ_USE_ZSTD -I. -c miniz.c -o miniz.o
               $CC -O2 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I. -c unpin_zstd.c -o unpin_zstd.o
