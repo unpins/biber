@@ -16,8 +16,9 @@
   # ExtUtils::Miniperl::writemain regenerates perlmain.c, the .a's are folded in).
   # The whole @INC (pure-Perl deps + the XS modules' .pm + biber's own lib) is
   # packed into the executable's single EOF ZIP (withUnpinEmbed; zstd method 93,
-  # shared dict) and served by a linker-level VFS: open/stat are intercepted
-  # (Linux `-Wl,--wrap`) and any `/zip/...` path is read back from the running
+  # shared dict) and served by a linker-level VFS: open/stat are rebound to the
+  # VFS shims (IR rewrite under the engine, `-Wl,--wrap` on the mingw build) and
+  # any `/zip/...` path is read back from the running
   # binary by the shared unpin-vfs core in self-EOF mode (-DUNPIN_VFS_SELF), so
   # there is no companion module tree on disk and no blob object/relink. The
   # binary runs biber directly (main injects the embedded /zip/bin/biber driver).
@@ -192,6 +193,15 @@
           # whole biber Perl closure through a (failing) cross compile. For native
           # x86_64 buildPackages.biber IS pkgs.biber, so this is a no-op there.
           biber = pkgs.buildPackages.biber;
+          # Upstream's own test controls (t/tdata: .bcf + .bib) for the build-
+          # time check below. The version is in the name so a nixpkgs biber bump
+          # misses the store path and fails on this hash instead of silently
+          # reusing the old data.
+          biberTestData = pkgs.fetchurl {
+            name = "biber-${biber.version}-source.tar.gz";
+            url = "https://github.com/plk/biber/archive/refs/tags/v${biber.version}.tar.gz";
+            hash = "sha256-JlLPOuCr/1+yM6p38Y5wAUzCxwuUqGk8CZo8rZu7SyA=";
+          };
 
           # ---- unpin-llvm engine plumbing (shared from nix-lib) ----
           # Under the engine sp=pkgs.pkgsStatic is the bitcode set, so every object
@@ -557,6 +567,45 @@
               cp -a "$NIX_BUILD_TOP/work/stage" "$out/.unpin-inc"
               runHook postInstall
             '';
+            # The module tree reaches the binary only in the post-build wrap, so
+            # this build's bin/biber cannot run on its own, and the CI smoke
+            # (`--version`) never parses a bibliography. Embed the same stage into
+            # a scratch copy with the wrap's own primitive, run upstream's control
+            # files through it, and require each .bbl to match the nixpkgs biber
+            # byte for byte. Only where the build platform runs the result.
+            doInstallCheck = sp.stdenv.buildPlatform.canExecute host;
+            nativeInstallCheckInputs = [
+              (ulib.unpinPackTool pkgs)
+              pkgs.buildPackages.unzip
+              pkgs.buildPackages.zstd
+            ];
+            installCheckPhase = ''
+              runHook preInstallCheck
+              # buildPhase exported this to keep build-time perl runs off the VFS;
+              # the shell carries it here, where it would hide the whole payload.
+              unset UNPIN_VFS_OFF
+              ${ulib.unpinEmbedSh}
+              g="$NIX_BUILD_TOP/guard"
+              mkdir -p "$g/stage" "$g/data" "$g/home"
+              cp "$out/bin/biber" "$g/biber"; chmod u+w "$g/biber"
+              cp -a "$out/.unpin-inc/." "$g/stage/"; chmod -R u+w "$g/stage"
+              __unpin_embed_subtree "$g/biber" "$g/stage"
+              tar xzf ${biberTestData} -C "$g/data" --strip-components=3 --wildcards '*/t/tdata/*'
+              cp -r "$g/data" "$g/ours"; cp -r "$g/data" "$g/ref"
+              export HOME="$g/home"
+              # bibtex + biblatexml sources, name parsing, Unicode sorting,
+              # transliteration, dates, uniqueness, labels, sections.
+              for n in full-bbl general names sort-complex translit biblatexml \
+                       dateformats uniqueness1 labelalpha sections-complex; do
+                ( cd "$g/ref" && ${biber}/bin/biber --noconf --quiet "$n" > "$n.out" 2>&1 ) \
+                  || { cat "$g/ref/$n.out"; echo "installCheck: reference biber failed on $n"; exit 1; }
+                ( cd "$g/ours" && "$g/biber" --noconf --quiet "$n" > "$n.out" 2>&1 ) \
+                  || { cat "$g/ours/$n.out"; echo "installCheck: biber failed on $n"; exit 1; }
+                cmp -s "$g/ours/$n.bbl" "$g/ref/$n.bbl" \
+                  || { diff "$g/ref/$n.bbl" "$g/ours/$n.bbl" | head -20; echo "installCheck: $n.bbl differs from the reference"; exit 1; }
+              done
+              runHook postInstallCheck
+            '';
           };
         in
         # The PRISTINE biber base (no embed); the @INC tree + man are embedded
@@ -571,8 +620,9 @@
         # Build via the unpin-llvm engine: pkgsStatic is swapped to the engine
         # stdenv, so perl + the 19 hand-built XS + libxml2/libxslt all compile to
         # LLVM bitcode and the binary is LTO-linked (whole-program opt, the same
-        # toolchain perl/curl/nmap/tcc use). The engine gates itself to native +
-        # darwin; the Linux crosses and windows (mingw) stay off-engine. The /zip
+        # toolchain perl/curl/nmap/tcc use). Every Linux and darwin target is on
+        # the engine, the crosses included; windows (windows.nix) is a gcc mingw
+        # build. The /zip
         # @INC embed is unchanged; the VFS is bound by IR symbol rewrite in `mk`
         # (bitcode has no `--wrap` / objcopy).
         engine = "unpin-llvm";

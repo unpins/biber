@@ -49,16 +49,12 @@ The [Releases](https://github.com/unpins/biber/releases) page has standalone bin
 
 ## Build notes
 
-biber is a Perl program built from ~100 modules, ~20 of them compiled (XS). A
-single static binary has no dynamic loader, so each XS module is linked in as a
-**static extension** instead of loaded as a `.so` at runtime. The whole module
-tree (the pure-Perl dependencies, the XS modules' `.pm`, and biber's own library)
-is packed into the executable's embedded ZIP and served by a linker-level VFS —
-`open`/`stat` are intercepted at link time so `@INC` reads straight out of the
-running binary, with no companion module tree on disk.
+biber is a Perl program. The binary carries the Perl interpreter, biber itself
+and all of the roughly 100 modules it uses, compiled ones included, so it needs
+no Perl installation and reads nothing from disk except your own files.
 
-- The four XS modules that carry an external C library are folded in statically
-  too: `Text::BibTeX` (bundled btparse), `Unicode::LineBreak` (bundled sombok),
-  `XML::LibXML` (libxml2) and `XML::LibXSLT` (libxslt/libexslt).
-- The only XS module left out is `Net::SSLeay`, used for `https` remote
-  datasources — biber runs fully offline without it.
+- Remote data sources work over `http://` but not `https://`: the TLS module
+  (`Net::SSLeay`) is not included. Local `.bib` and BibLaTeXML files are
+  unaffected.
+- The build runs biber's own test documents through the binary and checks that
+  every `.bbl` matches the one the reference biber produces.
