@@ -79,7 +79,12 @@
             # $Config{useshrplib} (the string 'false', truthy in perl). Same two
             # fixes unpins/perl applies for darwin: supply a real ranlib and
             # require the value to be the string "true".
-            configureFlags = (old.configureFlags or [ ])
+            configureFlags = (if crossCompiling
+              # perl-cross keeps ONE value per -A<var>= (a second -Accflags=
+              # replaces the first, where perl's Configure appends), so on a cross
+              # every -Accflags= is folded into a single argument in preConfigure.
+              then builtins.filter (f: !lib.hasPrefix "-Accflags=" f) (old.configureFlags or [ ])
+              else old.configureFlags or [ ])
               # Engine: perl's Configure nm-scans stdenv.cc.libc's archive for libc
               # symbols, but that is null under the engine (musl is served from
               # clang's on-demand sysroot) -> it loops on "Where is your C library?".
@@ -91,16 +96,34 @@
               # sysroot (not real files) so every musl header comes back absent.
               # Hand it a real musl of the same ABI to detect against.
               ++ engineIncFix
+              # 32-bit targets (i686, armv7l): perl's Configure and perl-cross both
+              # default to 32-bit integers, so biber loses dates whose epoch
+              # seconds pass 2^31 (upstream's dateformats control drops its
+              # year-17000002 entry, which the 64-bit targets keep). Use 64-bit
+              # integers so every target produces the same bibliography.
+              ++ lib.optional host.is32bit "-Duse64bitint"
               ++ lib.optionals isDarwin [
                 "-Dranlib=${prefix}ranlib"
-                # Engine on darwin: Configure's gccversion detection misfires so it
-                # never injects -fno-strict-aliasing and the darwin hints force -O3;
-                # perl's SV/magic type-punning then miscompiles ("panic:
-                # magic_killbackrefs" loading warnings.pm). Force them explicitly.
+              ]
+              # perl type-puns through its SV/magic unions and must be compiled with
+              # -fno-strict-aliasing -fwrapv. Configure adds them from gccversion,
+              # which misfires under the engine on darwin (the darwin hints force a
+              # bare -O3 and perl dies "panic: magic_killbackrefs" loading
+              # warnings.pm), so native darwin passes them here. The crosses get
+              # them in preConfigure below.
+              ++ lib.optionals (isDarwin && !crossCompiling) [
                 "-Accflags=-fno-strict-aliasing"
                 "-Accflags=-fwrapv"
               ];
             preConfigure = (old.preConfigure or "")
+              # perl-cross never adds -fno-strict-aliasing -fwrapv on its own, and
+              # without them every cross perl dies on its first module (armv7l
+              # "panic: magic_killbackrefs", riscv64/ppc64le SIGSEGV). Pass them
+              # with nixpkgs' own -Accflags as ONE argument: configureFlags would
+              # split it on the spaces, configureFlagsArray keeps it whole.
+              + lib.optionalString crossCompiling ''
+                configureFlagsArray+=("-Accflags=${lib.concatStringsSep " " ((map (lib.removePrefix "-Accflags=") (builtins.filter (f: lib.hasPrefix "-Accflags=" f) (old.configureFlags or [ ]))) ++ [ "-fno-strict-aliasing" "-fwrapv" ])}")
+              ''
               # Engine cross: perl-cross probes the ELF build host for readelf/
               # objdump, but the engine toolchain ships only the `llvm` multitool.
               # Point the env knobs at `llvm readelf/objdump` via bcIntrospect
@@ -110,12 +133,11 @@
                 export READELF="${ep.bcIntrospect} readelf"
                 export OBJDUMP="${ep.bcIntrospect} objdump"
               ''
-              # Engine darwin cross: -Accflags reaches only the TARGET perl. perl-
-              # cross builds the build-time miniperl in a separate `--mode=buildmini`
-              # respawn that takes ccflags from $HOSTCFLAGS (empty), so miniperl
-              # compiles WITHOUT -fno-strict-aliasing and segfaults on the same
-              # miscompile. Feed the flags via HOSTCFLAGS too.
-              + lib.optionalString (crossCompiling && isDarwin) ''
+              # -Accflags reaches only the TARGET perl. perl-cross builds the
+              # build-time miniperl in a separate `--mode=buildmini` respawn that
+              # takes its ccflags from $HOSTCFLAGS (empty), so that miniperl would
+              # hit the same miscompile. Feed the flags there too, on every cross.
+              + lib.optionalString crossCompiling ''
                 export HOSTCFLAGS="-fno-strict-aliasing -fwrapv"
               '';
             postPatch = crossBasePostPatch
@@ -602,7 +624,7 @@
                 ( cd "$g/ours" && "$g/biber" --noconf --quiet "$n" > "$n.out" 2>&1 ) \
                   || { cat "$g/ours/$n.out"; echo "installCheck: biber failed on $n"; exit 1; }
                 cmp -s "$g/ours/$n.bbl" "$g/ref/$n.bbl" \
-                  || { diff "$g/ref/$n.bbl" "$g/ours/$n.bbl" | head -20; echo "installCheck: $n.bbl differs from the reference"; exit 1; }
+                  || { diff "$g/ref/$n.bbl" "$g/ours/$n.bbl" | head -20 || true; echo "installCheck: $n.bbl differs from the reference"; exit 1; }
               done
               runHook postInstallCheck
             '';
