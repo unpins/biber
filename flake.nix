@@ -54,14 +54,19 @@
             # (aarch64<->x86_64) cross the engine builds that gmp, whose hand-asm
             # ld64.lld rejects ("BRANCH relocation width 1 must be 4"). Rewrite to
             # the native form; replaceStrings drops the text but keeps the string
-            # context, so also discard it to actually cut the coreutils edge
-            # (verified the sole context element of the cross postPatch). Native
-            # path unchanged.
+            # context, so also remove coreutils from it to actually cut the edge.
+            # Only coreutils: the rest of the context is the vendored CPAN
+            # tarballs nixpkgs unpacks in the same postPatch (HTTP-Tiny, …), and
+            # discarding those left the build opening paths it never fetched.
+            # Native path unchanged.
             crossBasePostPatch =
               let b = old.postPatch or ""; in
               if crossCompiling
-              then builtins.unsafeDiscardStringContext (builtins.replaceStrings
-                [ "'${sp.coreutils}/bin/pwd'" ] [ ''"$(type -P pwd)"'' ] b)
+              then builtins.appendContext
+                (builtins.unsafeDiscardStringContext (builtins.replaceStrings
+                  [ "'${sp.coreutils}/bin/pwd'" ] [ ''"$(type -P pwd)"'' ] b))
+                (lib.filterAttrs (k: _: !(lib.hasInfix "-coreutils-" k))
+                  (builtins.getContext b))
               else b;
           in {
             # On a case-insensitive FS (the darwin<->darwin cross) perl-cross's
