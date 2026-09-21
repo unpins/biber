@@ -572,12 +572,14 @@
                 rm -f perlmain.ll
               fi
               # LTO link; bitcode is globally resolved, so no --start-group.
-              # -Wl,-u,malloc: the whole-program LTO internalizes musl's WEAK malloc
-              # alias, but sombok's linebreak_add_prep references it late -> "undefined
-              # symbol: malloc". Force-keep it (per-package analogue of nix-lib's mega
-              # bitcodeLibcForce). Linux only; darwin's libc has no such weak alias.
+              # This link used to paste its own `-Wl,-u,malloc`: whole-program LTO
+              # internalizes musl's WEAK malloc alias, and sombok's
+              # linebreak_add_prep references it late -> "undefined symbol:
+              # malloc". nix-lib's engineLd now appends `-u malloc` to EVERY full
+              # link on a Linux engine target (it is baked into the cc wrapper's
+              # `-B`), so the flag arrives without being named here. If it ever
+              # goes missing again, fix it there, not per package.
               $CC -O2 -o biber \
-                ${lib.optionalString (!isDarwin) "-Wl,-u,malloc"} \
                 perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o \
                 $ALLA $COREA_VFS "$EXSLT_A" "$XSLT_A" "$XML2_A" \
                 $LDO libperl_vfs.a -lm
