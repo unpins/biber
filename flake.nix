@@ -655,6 +655,13 @@
         # @INC embed is unchanged; the VFS is bound by IR symbol rewrite in `mk`
         # (bitcode has no `--wrap` / objcopy).
         engine = "unpin-llvm";
+        # biber runs a single embedded driver, so there is nothing to fold and
+        # nothing to dispatch. The block is here to put the `.exe` on the engine
+        # too, instead of the nixpkgs mingw-gcc cross.
+        multicall = {
+          windows = true;
+          programs = [{ name = "biber"; }];
+        };
         embedMan = true;
         smoke = [ "--version" ];
         # Anchored on the version line, not the bare program name: the smoke step

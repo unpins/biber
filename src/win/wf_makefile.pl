@@ -23,5 +23,10 @@ unless (index($s, $staticrule.' pm_to_blib') >= 0) {
   die "static_modules rule anchor not found" if $k < 0;
   substr($s, $k + length($staticrule), 0) = ' pm_to_blib';
 }
+# perl-cross appends -Wl,-E (--export-dynamic) to the perl target on every host.
+# PE has no such option: GNU ld ignored it, lld errors out.
+$s =~ s/^perl\$x: LDFLAGS \+= -Wl,-E$//m;
+die "-Wl,-E still in Makefile" if $s =~ /-Wl,-E/;
+
 open my $o,'>',$f or die; print $o $s; close $o;
 print "makefile: win32obj wired into libperl + static pm_to_blib staged\n";

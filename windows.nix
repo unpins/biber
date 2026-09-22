@@ -56,6 +56,14 @@ let
   # into CORE (postInstall), so -I<CORE> resolves win32.h + the unix-shim tree.
   winXsCflags = "-D_GNU_SOURCE -std=gnu17 -fpermissive -DWIN64 -DPERLDLL";
 
+  # perl-cross probes its target objects with readelf/objdump, which the engine
+  # ships only as the `llvm` multitool, and the objects are bitcode.
+  ep = ulib.enginePerl {
+    inherit pkgs;
+    sp = cross;
+    introspectName = "unpin-biber-win-bc-introspect";
+  };
+
   # win32-native perl base: drop the cross coreutils-mingw postPatch (bakes a
   # broken /bin/pwd into Cwd.pm + drags the failing coreutils-mingw build), apply
   # the static-ext aux patch, run winfix-spike after perl-cross configure, and
@@ -64,6 +72,10 @@ let
     patches = (old.patches or [ ]) ++ [ ./patches/ext-re-static-aux.patch ];
     postPatch = ''
       substituteInPlace cnf/configure_tool.sh --replace-fail "cc -E -P" "cc -E"
+    '';
+    preConfigure = (old.preConfigure or "") + ''
+      export READELF="${ep.bcIntrospect} readelf"
+      export OBJDUMP="${ep.bcIntrospect} objdump"
     '';
     postConfigure = (old.postConfigure or "") + ''
       echo "=== unpin winfix-spike (win32-native, real @INC) ==="
@@ -107,6 +119,9 @@ let
   buildPhase = ''
     runHook preBuild
     BPERL=${bperl}
+    # The engine LLVM multitool (`llvm opt`, `llvm ar`): every object here is
+    # bitcode, which the binutils shims cannot read.
+    MT=${ep.multitool}
     ARCH="${winPerl}/${archSub}"
     CORE="$ARCH/CORE"
     # codegen perl = build-host perl pointed at the target archlib for %Config
@@ -143,6 +158,12 @@ let
     mkdir -p win32mod
     tar xf "$WIN32_SRC" -C win32mod --strip-components=3 --wildcards '*/cpan/Win32/*'
     ( cd win32mod
+      # Win32.xs gates <winhttp.h> on gcc >= 4.8, and clang answers that probe
+      # as gcc 4.2 — so Win32::HttpGetFile silently vanished from the .exe, the
+      # one function of the 55 that needs the header. The compiler is newer than
+      # the check, not older.
+      $PERL -i -pe 's{^#if !defined\(__GNUC__\).*408000\)$}{#if 1 /* unpin: clang answers the gcc probe as 4.2 */}' Win32.xs
+      grep -q 'unpin: clang answers' Win32.xs || { echo "Win32.xs winhttp gate not found" >&2; exit 1; }
       $PERL -MExtUtils::ParseXS -e \
         'ExtUtils::ParseXS->new->process_file(filename=>"Win32.xs", output=>"Win32.c", typemap=>["'"$TYPEMAP"'"])'
       $CC -O2 ${winXsCflags} -DVERSION='"0.59_01"' -DXS_VERSION='"0.59_01"' -I"$CORE" -c Win32.c -o Win32.o
@@ -210,10 +231,23 @@ let
         $PERL -I. Makefile.PL LINKTYPE=static PERL="$BPERL" FULLPERL="$BPERL" >/dev/null
         make -j$NIX_BUILD_CORES CC="$CC" LD="$CC" AR="$AR" OPTIMIZE="-O2" static pm_to_blib >/dev/null )
     done
-    # mingw binutils objcopy (COFF-aware; llvm-objcopy rejects --weaken-symbol on
-    # COFF). Weaken the bundled PerlIOBase_flush_linebuf so libperl's wins.
-    $OBJCOPY --weaken-symbol=PerlIOBase_flush_linebuf \
-      pure/PerlIOutf8_strict/blib/arch/auto/PerlIO/utf8_strict/utf8_strict.a
+    # PerlIO::utf8_strict bundles its own PerlIOBase_flush_linebuf, which
+    # collides with libperl's. Weaken it so libperl's definition wins. The
+    # member is BITCODE under the engine, which no objcopy can edit ("not
+    # recognized as a valid object file"), so the linkage is changed in the IR —
+    # `weak` is exactly what `objcopy --weaken-symbol` writes into the symtab.
+    __w8=pure/PerlIOutf8_strict/blib/arch/auto/PerlIO/utf8_strict/utf8_strict.a
+    __wd=$(mktemp -d)
+    ( cd "$__wd" && $MT ar x "$OLDPWD/$__w8" )
+    for __o in "$__wd"/*; do
+      [ -f "$__o" ] || continue
+      $MT opt -S "$__o" -o "$__o.ll"
+      sed -i -E 's/^define ([^@]*)@PerlIOBase_flush_linebuf\(/define weak \1@PerlIOBase_flush_linebuf(/' "$__o.ll"
+      $MT opt "$__o.ll" -o "$__o"
+      rm -f "$__o.ll"
+    done
+    rm -f "$__w8" && $MT ar rcs "$__w8" "$__wd"/*
+    rm -rf "$__wd"
     ALLA="$ALLA $(find pure -path '*/blib/arch/auto/*.a' | tr '\n' ' ')"
     EXTS="$EXTS $(find pure -path '*/blib/arch/auto/*.a' | sed -E 's|.*/blib/arch/auto/||; s|/[^/]*\.a$||' | sort -u | tr '\n' ' ')"
 

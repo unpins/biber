@@ -30,6 +30,9 @@ setv i8type char
 setv u8type "'unsigned char'"
 setv longdblsize 16
 setv sizesize 8
+# perl-cross's mingw hint says uint64_t, which config.h then spells in files
+# (ext/SDBM_File's sdbm.c) that never include <stdint.h>; config.gc says size_t.
+setv sizetype size_t
 setv _exe "'.exe'"
 setv exe_ext "'.exe'"
 
