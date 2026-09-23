@@ -287,7 +287,12 @@
               # darwin); +crypt.h include there. UNPIN_VFS_OFF keeps the VFS
               # dormant for build-time perl runs (writemain etc.).
               export NIX_CFLAGS_COMPILE="''${NIX_CFLAGS_COMPILE:-} ${lfs} ${cryptInc}"
-              export NIX_LDFLAGS="''${NIX_LDFLAGS:-} ${cryptLib}"
+              # NIX_CFLAGS_LINK, not NIX_LDFLAGS: the cc wrapper `-Wl,`-prefixes
+              # every token NIX_LDFLAGS holds, and the engine clang hands the
+              # whole token to ld.lld verbatim — "cannot open …-Wl,/nix/store/
+              # …/libiconv.a" on darwin. NIX_CFLAGS_LINK reaches the compiler
+              # line as written, which is where an archive path belongs.
+              export NIX_CFLAGS_LINK="''${NIX_CFLAGS_LINK:-} ${cryptLib}"
               export UNPIN_VFS_OFF=1
               ${if crossCompiling then ''
                 # cross: target perl can't run here. Derive its archlib by glob and
