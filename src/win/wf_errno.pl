@@ -11,4 +11,9 @@ my $d = q[if ($Config{gccversion} ne '' && $IsMSWin32) {];
 my $e = q[    if ($^O eq 'linux') {];
 my $g = q[    if ($^O eq 'linux' && !$IsMSWin32) {];
 (index($s,$e)>=0) or die "linux guard anchor"; $s =~ s/\Q$e\E/$g/;
+# 4) the engine's mingw headers exist only inside clang (/__unpin_ziglib__/…),
+#    so the includes.c loop's `-f` test drops errno.h itself and Errno.pm loses
+#    ENOENT/EINTR/EEXIST/…; include it by name, ahead of the files that passed.
+my $h = q[	die "Cannot open includes.c";];
+(index($s,$h)>=0) or die "includes.c anchor"; $s =~ s/\Q$h\E/$h\n    print INCS qq[#include <errno.h>\\n];/;
 open my $o,'>',$f or die; print $o $s; close $o; print "errno patched\n";

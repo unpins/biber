@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows, `--input-encoding` and `--output-encoding` accepted only UTF-8,
+  UTF-16/32, ASCII, Latin-1 and cp1252; any other encoding (`latin2`, `koi8-r`,
+  `shiftjis`, …) failed with `Unknown encoding`. The binary grows from 29.9 MB
+  to 34.6 MB with the encoding tables.
+- On Windows, the embedded perl's `Errno` knew none of the standard error codes
+  (`ENOENT`, `EINTR`, …), and `Socket` was missing.
+
 ## [2.21-4] - 2026-09-26
 
 ### Changed

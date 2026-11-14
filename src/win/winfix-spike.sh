@@ -70,6 +70,9 @@ done
 # 4d) Errno: honor TARGET osname (use mingw errno.h, not host /usr/include)
 "$NPERL" "$WFDIR/wf_errno.pl" ext/Errno/Errno_pm.PL
 
+# 4e) Encode's XS sub-extensions (perl-cross does not descend into cpan/Encode)
+"$NPERL" "$WFDIR/wf_encode.pl" config.sh Makefile
+
 # 5) win32 host-layer: Win32iop.h case-insensitive symlink (Linux is case-sensitive)
 ln -sf win32iop.h win32/Win32iop.h
 

@@ -73,6 +73,20 @@ let
     postPatch = ''
       substituteInPlace cnf/configure_tool.sh --replace-fail "cc -E -P" "cc -E"
     '';
+    # perl-cross picks extensions from probes that link against the C library
+    # alone. socket() lives in ws2_32 and mingw has no langinfo.h, so Socket and
+    # I18N::Langinfo would be dropped although win32 perl builds both (Langinfo
+    # via perl_langinfo.h). The values only gate extension selection: winfix-spike's
+    # config.gc overlay sets the real d_*/i_* afterwards. Sys::Syslog rides the
+    # same d_socket gate but stays out: its Windows backend needs
+    # Win32::EventLog, which is not core, and its Makefile.PL keys the win32
+    # files on the build host's $^O.
+    configureFlags = (old.configureFlags or [ ]) ++ [
+      "-Dd_socket=define"
+      "-Di_langinfo=define"
+      "-Dd_nl_langinfo=define"
+      "--disable-mod=Sys-Syslog"
+    ];
     preConfigure = (old.preConfigure or "") + ''
       export READELF="${ep.bcIntrospect} readelf"
       export OBJDUMP="${ep.bcIntrospect} objdump"
@@ -193,27 +207,6 @@ let
       done
       $AR cr Win32_Unicode.a XS.o File.o Dir.o Console.o Util.o Error.o Native.o Process.o )
     ALLA="$ALLA w32u/Win32_Unicode.a"; EXTS="$EXTS Win32/Unicode"
-
-    # ===== (0c) Encode::Unicode (utf16-le, needed by Win32::Unicode::Util) =====
-    # perl-cross builds only the top-level Encode XS (ascii/8859-1/cp1252/null via
-    # the def_t table baked into Encode.a), not Encode's sub-encoding dists. So
-    # Encode::Unicode -- which registers UTF-16/UTF-32/UCS-2 -- is absent and
-    # Encode::find_encoding('utf16-le') returns undef. Win32::Unicode::Util encodes
-    # every path to UTF-16LE for the wide Win32 API, so without it biber dies
-    # ("Can't call method encode on an undefined value"). On Linux/mac Win32::
-    # Unicode is never loaded, so the gap was invisible there. Unicode.xs is
-    # hand-written (no enc2xs tables), so build it like the other XS; it #includes
-    # ../Encode/encode.h, which the strip-3 extract places at encu/Encode/encode.h.
-    # Encode/Config.pm (staged from winPerl) maps UTF-16LE -> Encode::Unicode, so
-    # once the ext is registered the load-on-demand from find_encoding resolves it.
-    mkdir -p encu
-    tar xf "$WIN32_SRC" -C encu --strip-components=3 --wildcards '*/cpan/Encode/*'
-    ( cd encu
-      $PERL -MExtUtils::ParseXS -e \
-        'ExtUtils::ParseXS->new->process_file(filename=>"Unicode/Unicode.xs", output=>"Unicode/Unicode.c", typemap=>["'"$TYPEMAP"'"])'
-      $CC -O2 ${winXsCflags} -DVERSION='"2.20"' -DXS_VERSION='"2.20"' -I"$CORE" -c Unicode/Unicode.c -o Unicode/Unicode.o
-      $AR cr Encode_Unicode.a Unicode/Unicode.o )
-    ALLA="$ALLA encu/Encode_Unicode.a"; EXTS="$EXTS Encode/Unicode"
 
     # ===== (1) the 14 pure-XS via the generic loop =====
     mkdir -p pure
@@ -382,10 +375,6 @@ let
     # statically; these .pm drive it. Arch-independent, staged into the blob.
     cp w32u/lib/Win32/Unicode.pm stage/inc/perl/Win32/Unicode.pm
     cp -r w32u/lib/Win32/Unicode stage/inc/perl/Win32/
-    # Encode::Unicode .pm (the XS above is registered statically; this drives it).
-    # winPerl staged Encode/ (Config.pm etc.) but not Unicode.pm, so add it.
-    mkdir -p stage/inc/perl/Encode
-    cp encu/Unicode/Unicode.pm stage/inc/perl/Encode/Unicode.pm
     find stage/inc -type f \( -name '*.so' -o -name '*.dll' -o -name '*.a' -o -name '*.h' -o -name '*.ld' -o -path '*/CORE/*' \) -delete
     find stage/inc -depth -type d -empty -delete 2>/dev/null || true
     {
