@@ -10,6 +10,10 @@
   to 34.6 MB with the encoding tables.
 - On Windows, the embedded perl's `Errno` knew none of the standard error codes
   (`ENOENT`, `EINTR`, …), and `Socket` was missing.
+- On Windows, the embedded perl's `HTTP::Tiny` and `Compress::Raw::*` are now
+  the versions nixpkgs carries for security fixes, as on Linux and macOS
+  (`HTTP::Tiny` 0.094, `Compress::Raw::Zlib` 2.222), not the older ones bundled
+  with perl.
 
 ## [2.21-4] - 2026-09-26
 

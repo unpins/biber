@@ -64,15 +64,29 @@ let
     introspectName = "unpin-biber-win-bc-introspect";
   };
 
-  # win32-native perl base: drop the cross coreutils-mingw postPatch (bakes a
-  # broken /bin/pwd into Cwd.pm + drags the failing coreutils-mingw build), apply
-  # the static-ext aux patch, run winfix-spike after perl-cross configure, and
-  # stage the win32 host headers into CORE so external XS find them.
+  # win32-native perl base: drop the cross Cwd.pm /bin/pwd rewrite (bakes a
+  # broken path in + drags the failing coreutils-mingw build), apply the
+  # static-ext aux patch, run winfix-spike after perl-cross configure, and stage
+  # the win32 host headers into CORE so external XS find them.
   winPerl = cross.perl.overrideAttrs (old: {
     patches = (old.patches or [ ]) ++ [ ./patches/ext-re-static-aux.patch ];
-    postPatch = ''
-      substituteInPlace cnf/configure_tool.sh --replace-fail "cc -E -P" "cc -E"
-    '';
+    # nixpkgs' cross postPatch minus that rewrite. The rest stays: the cpp
+    # `-E -P` fix, and the CPAN distributions nixpkgs bumps for CVEs
+    # (HTTP-Tiny, Compress-Raw-*, IO-Compress…). The coreutils edge lives in
+    # the string context, so it is cut there too.
+    postPatch =
+      let
+        b = old.postPatch or "";
+        plain = builtins.unsafeDiscardStringContext;
+        cwd = plain ''
+          substituteInPlace dist/PathTools/Cwd.pm \
+            --replace "/bin/pwd" '${cross.coreutils}/bin/pwd'
+        '';
+      in
+      assert lib.hasInfix cwd (plain b);
+      builtins.appendContext
+        (builtins.replaceStrings [ cwd ] [ "" ] (plain b))
+        (lib.filterAttrs (k: _: !(lib.hasInfix "-coreutils-" k)) (builtins.getContext b));
     # perl-cross picks extensions from probes that link against the C library
     # alone. socket() lives in ws2_32 and mingw has no langinfo.h, so Socket and
     # I18N::Langinfo would be dropped although win32 perl builds both (Langinfo
