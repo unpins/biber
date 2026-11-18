@@ -246,16 +246,14 @@
             introspectName = "unpin-biber-bc-introspect";
           };
           engineMultitool = ep.multitool;
-          # A real musl (same 1.2.x ABI) for perl's native Configure to scan: the
-          # engine's own musl headers live inside the clang binary's VFS, invisible
-          # to Configure's `test -f`. HOST platform, not build (an i686 target is
-          # x86_64-runnable = native, but needs 32-bit headers). Linux native only.
+          # The target musl's headers (nix-lib's header-only install) for perl's
+          # native Configure to scan: the engine's own headers live inside the
+          # clang binary's VFS, invisible to Configure's `test -f`. HOST platform,
+          # not build (an i686 target is x86_64-runnable = native, but needs
+          # 32-bit headers). Linux native only.
           engineIncFix =
             if crossCompiling || isDarwin then [ ]
-            else
-              let musl = (import pkgs.path { inherit (host) system; })
-                .pkgsStatic.stdenv.cc.libc;
-              in [ "-Dlocincpth=${lib.getDev musl}/include" ];
+            else [ "-Dlocincpth=${sp.unpinMuslHeaders}/include" ];
 
           # The 14 pure-XS (no external C library) modules of biber's closure.
           pureXs = {
