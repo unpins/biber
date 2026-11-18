@@ -7,11 +7,10 @@
 # pin, sitecustomize, UNPIN_VFS_FIXED_INC and the inc-macro patch are dropped --
 # the spike points @INC via PERL5LIB/-I like the linux/darwin proofs.
 #
-# Usage: winfix-spike.sh <wfdir> <mcfstatic-libdir>   ($NPERL = native build perl)
+# Usage: winfix-spike.sh <wfdir>   ($NPERL = native build perl)
 set -e
 W="$(pwd)"
 WFDIR="$1"
-MCF="$2"
 : "${NPERL:?NPERL (native perl) must be set}"
 GCSRC="$W/win32/config.gc"
 
@@ -57,9 +56,8 @@ done
 # 3) stdio FILE accessors -> safe PERLIO_FILE_* (matches official win32 config.h)
 "$NPERL" "$WFDIR/wf_stdio.pl" config.sh
 
-# 4) ccflags/ldflags/libs: win32 host-layer includes (absolute), static mcfgthread,
-#    win32 syslibs.
-"$NPERL" "$WFDIR/wf_flags.pl" config.sh "$W" "$MCF"
+# 4) ccflags/ldflags/libs: win32 host-layer includes (absolute), win32 syslibs.
+"$NPERL" "$WFDIR/wf_flags.pl" config.sh "$W"
 
 # 4b) perl-cross Makefile: add win32 host objs to TARGET libperl (+ static pm_to_blib)
 "$NPERL" "$WFDIR/wf_makefile.pl" Makefile

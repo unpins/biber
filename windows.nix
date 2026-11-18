@@ -25,7 +25,6 @@ let
   bperl = "${pkgs.buildPackages.perl}/bin/perl";       # native perl: winfix + codegen
   biber = pkgs.buildPackages.biber;                     # arch-indep driver + @INC trees
   winDir = ./src/win;
-  mcfA = "${cross.windows.mcfgthreads}/lib";            # static libmcfgthread.a
   archSub = "lib/perl5/5.42.0/MSWin32-x64";
 
   # static mingw libxml2/libxslt (+ their static deps) -- the XML XS link these.
@@ -107,7 +106,7 @@ let
     '';
     postConfigure = (old.postConfigure or "") + ''
       echo "=== unpin winfix-spike (win32-native, real @INC) ==="
-      NPERL=${bperl} bash ${winDir}/winfix-spike.sh ${winDir} ${mcfA}
+      NPERL=${bperl} bash ${winDir}/winfix-spike.sh ${winDir}
     '';
     postInstall = (old.postInstall or "") + ''
       CORE=$(echo "$out"/${archSub}/CORE)
@@ -445,7 +444,7 @@ let
       perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o \
       $ALLA $COREA "$EXSLT_A" "$XSLT_A" "$XML2_A" "$Z_A" "$ICONV_A" \
       "$CORE/libperl.a" -Wl,--allow-multiple-definition \
-      $SYSLIBS $EXTRALIBS ${mcfA}/libmcfgthread.a -lbcrypt -luserenv -lwinhttp
+      $SYSLIBS $EXTRALIBS -lbcrypt -luserenv -lwinhttp
     file biber.exe
     runHook postBuild
   '';
