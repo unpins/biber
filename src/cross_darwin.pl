@@ -19,6 +19,9 @@
 # We also drop the two `|| die` guards so a missing readelf/objdump is no longer
 # fatal (they are never called after these rewrites).
 #
+# Kept as a script rather than a .patch: every rewrite dies on a missing anchor,
+# so a perl-cross bump fails as loudly as a patch would.
+#
 # Runs in postPatch for the darwin cross only; perl-cross is laid into the perl
 # source tree by nixpkgs' postUnpack (`cp -R perl-cross/* perl-<ver>/`), so its
 # cnf/ scripts are plain files here. Linux crosses keep the stock readelf path

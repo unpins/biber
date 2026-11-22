@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Spike-trimmed winfix: turn a perl-cross-configured tree into a real win32-native
-# target, WITHOUT the unpins VFS (@INC stays the real install tree, not /zip). This
-# is a stripped copy of unpins/perl/src/win/winfix.sh keeping only the bits needed
-# to make the interpreter build+run win32-native (overlay config.gc OS/ABI vars,
-# wire win32/*.c into libperl, stdio/flags/errno/HiRes, exe suffix). The /zip @INC
-# pin, sitecustomize, UNPIN_VFS_FIXED_INC and the inc-macro patch are dropped --
-# the spike points @INC via PERL5LIB/-I like the linux/darwin proofs.
+# Turn a perl-cross-configured tree into a real win32-native target. A trimmed
+# copy of unpins/perl/src/win/winfix.sh keeping only what the interpreter needs
+# to build and run win32-native (overlay config.gc OS/ABI vars, wire win32/*.c
+# into libperl, stdio/flags/errno/HiRes, exe suffix). The interpreter itself
+# knows nothing of /zip: the VFS joins in the final biber.exe relink
+# (windows.nix), where the driver pins @INC to the embedded tree.
 #
 # Usage: winfix-spike.sh <wfdir>   ($NPERL = native build perl)
 set -e

@@ -13,8 +13,9 @@
  *                   `objcopy --redefine-sym` can bind the entry. perlmain's
  *                   `@main` is IR-renamed to `@real_main` and this object
  *                   supplies plain `main`. One path for both platforms.
- *   Off-engine Windows (mingw): -Wl,--wrap=main routes the crt's main() to
- *                   __wrap_main; __real_main is perl's own generated main.
+ *   Windows (engine, mingw target): the relink is not IR-rewritten, so lld's
+ *                   -Wl,--wrap=main routes the crt's main() to __wrap_main;
+ *                   __real_main is perl's own generated main.
  */
 #include <stdlib.h>
 
@@ -40,7 +41,7 @@ int main(int argc, char **argv, char **envp) {
     return unpin_run(argc, argv, envp, real_main);
 }
 #else
-/* Off-engine Windows (mingw): -Wl,--wrap=main. */
+/* Windows: lld's -Wl,--wrap=main. */
 extern int __real_main(int argc, char **argv, char **envp);
 int __wrap_main(int argc, char **argv, char **envp) {
     return unpin_run(argc, argv, envp, __real_main);

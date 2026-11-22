@@ -1,0 +1,16 @@
+Test useshrplib for the string "true".
+
+On a static perl $Config{useshrplib} is the string 'false', which is true
+in perl, so installperl ran install_name_tool on darwin.
+
+--- a/installperl
++++ b/installperl
+@@ -753,7 +753,7 @@
+     my $file = shift;
+ 
+     $^O eq "darwin" && $Config{osvers} =~ /^(1[5-9]|[2-9])/
+-      && $Config{useshrplib}
++      && $Config{useshrplib} eq "true"
+       or return;
+ 
+     my @opts;

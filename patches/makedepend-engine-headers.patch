@@ -1,0 +1,17 @@
+Drop the engine's virtual headers from makedepend.
+
+The engine cc reports musl headers under its virtual sysroot
+/__unpin_ziglib__/...; recorded as prerequisites, make dies with "No
+rule to make target .../alloca.h".
+
+--- a/makedepend_file.SH
++++ b/makedepend_file.SH
+@@ -151,7 +151,7 @@
+ 	    -e '1d' \
+ 	    -e '/^#.*<stdin>/d' \
+             -e '/^#.*<builtin>/d' \
+-            -e '/^#.*<built-in>/d' \
++            -e '/^#.*<built-in>/d' -e '\#/__unpin_ziglib__#d' \
+             -e '/^#.*<command line>/d' \
+             -e '/^#.*<command-line>/d' \
+ 	    -e '/^#.*"-"/d' \

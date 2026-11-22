@@ -6,7 +6,7 @@
 # read back by the shared unpin-vfs core in self-EOF mode, served by a
 # linker-level VFS. Windows has no memfd, so the VFS materialises each /zip
 # entry to a temp file and delegates to perl's real win32_{open,stat,lstat,
-# access} (intercepted with mingw `ld --wrap`); `--wrap=main` injects the
+# access} (intercepted with lld's `--wrap`); `--wrap=main` injects the
 # embedded /zip/bin/biber driver.
 #
 # Two things differ from Linux:
@@ -17,6 +17,10 @@
 #      (xsubpp/ParseXS, writemain) runs with the build-host perl while the mingw
 #      cross toolchain compiles the C -- exactly how nixpkgs/perl-cross
 #      cross-builds native modules.
+#
+# The perl-side rewrites run by winfix-spike.sh (src/win/wf_*.pl) are scripts,
+# not patches: they edit what perl-cross's configure writes (config.sh, the
+# Makefile) or need the configured tree, and each dies on a missing anchor.
 { ulib }:
 pkgs:
 let
@@ -25,7 +29,8 @@ let
   bperl = "${pkgs.buildPackages.perl}/bin/perl";       # native perl: winfix + codegen
   biber = pkgs.buildPackages.biber;                     # arch-indep driver + @INC trees
   winDir = ./src/win;
-  archSub = "lib/perl5/5.42.0/MSWin32-x64";
+  privSub = "lib/perl5/${cross.perl.version}";
+  archSub = "${privSub}/MSWin32-x64";
 
   # static mingw libxml2/libxslt (+ their static deps) -- the XML XS link these.
   msc = ulib.mingwStaticCross pkgs;
@@ -38,20 +43,21 @@ let
   # independent .pm, staged into the @INC blob below.
   win32ShellQuote = pkgs.perlPackages.Win32ShellQuote;
 
-  # Win32::Unicode (XAICRON 0.38) -- NOT packaged in nixpkgs. On Windows,
+  # Win32::Unicode (XAICRON) -- NOT packaged in nixpkgs. On Windows,
   # Biber::Utils routes file slurp/spew/stat/size through Win32::Unicode::File
   # whenever the system ANSI code page isn't UTF-8 (Win32::GetACP() != 65001 --
   # the usual case, e.g. CP1252), so its OO filehandle + statW + file_size are
   # mandatory for the .bcf->.bbl path. Pure-Perl wrappers over a single XS (the
   # eight xs/*.xs fold into one `Win32::Unicode` ext); no external C library and
   # no Win32::API dependency, so it builds by hand like the other static XS.
+  w32uVersion = "0.38";
   w32uSrc = pkgs.fetchurl {
-    url = "mirror://cpan/authors/id/X/XA/XAICRON/Win32-Unicode-0.38.tar.gz";
+    url = "mirror://cpan/authors/id/X/XA/XAICRON/Win32-Unicode-${w32uVersion}.tar.gz";
     hash = "sha256-xSzZBJxR7cXPvQZaySpDJ+e4eMrnZOQMao2xyJ7ig40=";
   };
 
-  # win32 ccflags for an external XS compiled against the installed base. mingw-gcc
-  # predefines WIN32; spell out WIN64/PERLDLL. The win32 host headers are staged
+  # win32 ccflags for an external XS compiled against the installed base. The
+  # mingw target predefines WIN32; spell out WIN64/PERLDLL. The win32 host headers are staged
   # into CORE (postInstall), so -I<CORE> resolves win32.h + the unix-shim tree.
   winXsCflags = "-D_GNU_SOURCE -std=gnu17 -fpermissive -DWIN64 -DPERLDLL";
 
@@ -138,7 +144,7 @@ let
   PARAMSVALIDATE_SRC = pp.ParamsValidate.src;
   # perl source tarball -> its bundled cpan/Win32 (the Win32 module, an XS that
   # wraps the native Win32 API). Not a standalone perlPackage, so take it from
-  # the perl dist; same 5.42.0 source the interpreter is built from.
+  # the perl dist; the same source the interpreter is built from.
   WIN32_SRC = pkgs.perl.src;
   W32U_SRC = w32uSrc;
   meta = (biber.meta or { }) // { mainProgram = "biber"; };
@@ -152,7 +158,7 @@ let
     ARCH="${winPerl}/${archSub}"
     CORE="$ARCH/CORE"
     # codegen perl = build-host perl pointed at the target archlib for %Config
-    # (Config_heavy.pl is data; same 5.42.0). Shadow Cwd with the host copy (the
+    # (Config_heavy.pl is data; same perl). Shadow Cwd with the host copy (the
     # target's static Cwd XS can't run here) -- same as the linux/darwin cross.
     BARCH_B="$($BPERL -MConfig -e 'print $Config{archlibexp}')"
     mkdir -p "$NIX_BUILD_TOP/cwddir/auto"
@@ -193,7 +199,9 @@ let
       grep -q 'unpin: clang answers' Win32.xs || { echo "Win32.xs winhttp gate not found" >&2; exit 1; }
       $PERL -MExtUtils::ParseXS -e \
         'ExtUtils::ParseXS->new->process_file(filename=>"Win32.xs", output=>"Win32.c", typemap=>["'"$TYPEMAP"'"])'
-      $CC -O2 ${winXsCflags} -DVERSION='"0.59_01"' -DXS_VERSION='"0.59_01"' -I"$CORE" -c Win32.c -o Win32.o
+      W32V="$($PERL -ne 'print $1 if /^\s*\$VERSION = '"'"'([^'"'"']+)'"'"';/' Win32.pm)"
+      [ -n "$W32V" ] || { echo "Win32.pm: no \$VERSION line" >&2; exit 1; }
+      $CC -O2 ${winXsCflags} -DVERSION="\"$W32V\"" -DXS_VERSION="\"$W32V\"" -I"$CORE" -c Win32.c -o Win32.o
       $AR cr Win32.a Win32.o )
     ALLA="$ALLA win32mod/Win32.a"; EXTS="$EXTS Win32"
 
@@ -206,17 +214,16 @@ let
     # ext name `Win32/Unicode` makes writemain register `Win32::Unicode::bootstrap`,
     # which XSLoader::load('Win32::Unicode') (from Win32/Unicode/XS.pm) resolves
     # statically. ppport.h via Devel::PPPort (Module::Install::XSUtil would emit
-    # it on a normal build). mingw needs <sys/utime.h> for struct _utimbuf /
-    # _wutime in File.xs (MSVC drags it in via <sys/stat.h>; mingw does not).
+    # it on a normal build).
     mkdir -p w32u
     tar xf "$W32U_SRC" -C w32u --strip-components=1
     ( cd w32u
-      sed -i 's|#include <windows.h>|#include <windows.h>\n#include <sys/utime.h>|' xs/File.xs
+      patch -p1 < ${./patches/win32-unicode-sys-utime.patch}
       $PERL -MDevel::PPPort -e 'Devel::PPPort::WriteFile("ppport.h")'
       for x in XS File Dir Console Util Error Native Process; do
         $PERL -MExtUtils::ParseXS -e \
           'ExtUtils::ParseXS->new->process_file(filename=>"xs/'"$x"'.xs", output=>"'"$x"'.c", typemap=>["'"$TYPEMAP"'","'"$PWD"'/xs/typemap"])'
-        $CC -O2 ${winXsCflags} -DVERSION='"0.38"' -DXS_VERSION='"0.38"' -I"$CORE" -I. -c "$x.c" -o "$x.o"
+        $CC -O2 ${winXsCflags} -DVERSION='"${w32uVersion}"' -DXS_VERSION='"${w32uVersion}"' -I"$CORE" -I. -c "$x.c" -o "$x.o"
       done
       $AR cr Win32_Unicode.a XS.o File.o Dir.o Console.o Util.o Error.o Native.o Process.o )
     ALLA="$ALLA w32u/Win32_Unicode.a"; EXTS="$EXTS Win32/Unicode"
@@ -266,8 +273,8 @@ let
           -e 's|\[% STRLCAT %\]|undef HAVE_STRLCAT|' \
           -e 's|\[% VSNPRINTF %\]|define HAVE_VSNPRINTF 1|' \
           -e 's|\[% PACKAGE %\]|"libbtparse"|g' \
-          -e 's|\[% FPACKAGE %\]|"libbtparse 0.91"|' \
-          -e 's|\[% VERSION %\]|"0.91"|' \
+          -e 's|\[% FPACKAGE %\]|"libbtparse ${pp.TextBibTeX.version}"|' \
+          -e 's|\[% VERSION %\]|"${pp.TextBibTeX.version}"|' \
           btparse/src/bt_config.h.in > btparse/src/bt_config.h
       for c in btparse/src/*.c; do
         $CC -O2 ${winXsCflags} -Ibtparse/src -Ibtparse/pccts -c "$c" -o "''${c%.c}.o"
@@ -275,7 +282,7 @@ let
       $AR cr libbtparse.a btparse/src/*.o
       $PERL -MExtUtils::ParseXS -e \
         'ExtUtils::ParseXS->new->process_file(filename=>"xscode/BibTeX.xs", output=>"BibTeX.c", typemap=>["'"$TYPEMAP"'","'"$PWD"'/typemap"])'
-      $CC -O2 ${winXsCflags} -DVERSION='"0.91"' -DXS_VERSION='"0.91"' -I"$CORE" -Ibtparse/src -Ixscode -c BibTeX.c -o BibTeX.o
+      $CC -O2 ${winXsCflags} -DVERSION='"${pp.TextBibTeX.version}"' -DXS_VERSION='"${pp.TextBibTeX.version}"' -I"$CORE" -Ibtparse/src -Ixscode -c BibTeX.c -o BibTeX.o
       $CC -O2 ${winXsCflags} -I"$CORE" -Ibtparse/src -Ixscode -c xscode/btxs_support.c -o btxs_support.o
       $AR cr BibTeX.a BibTeX.o btxs_support.o )
     ALLA="$ALLA bibtex/BibTeX.a bibtex/libbtparse.a"; EXTS="$EXTS Text/BibTeX"
@@ -313,7 +320,7 @@ let
         make -j$NIX_BUILD_CORES CC="$CC" LD="$CC" AR="$AR" OPTIMIZE="-O2" >/dev/null )
       $PERL -MExtUtils::ParseXS -e \
         'ExtUtils::ParseXS->new->process_file(filename=>"LineBreak.xs", output=>"LineBreak.c", typemap=>["'"$TYPEMAP"'","'"$PWD"'/typemap"])'
-      $CC -O2 ${winXsCflags} -DVERSION='"2019.001"' -DXS_VERSION='"2019.001"' -I"$CORE" -Isombok/include -I. -c LineBreak.c -o LineBreak.o
+      $CC -O2 ${winXsCflags} -DVERSION='"${pp.UnicodeLineBreak.version}"' -DXS_VERSION='"${pp.UnicodeLineBreak.version}"' -I"$CORE" -Isombok/include -I. -c LineBreak.c -o LineBreak.o
       $AR cr LineBreak.a LineBreak.o )
     ALLA="$ALLA linebreak/LineBreak.a $(find linebreak/sombok -name 'libsombok*.a' | head -1)"; EXTS="$EXTS Unicode/LineBreak"
 
@@ -322,15 +329,18 @@ let
     ( cd params
       $PERL -MExtUtils::ParseXS -e \
         'ExtUtils::ParseXS->new->process_file(filename=>"lib/Params/Validate/XS.xs", output=>"PV_XS.c", typemap=>["'"$TYPEMAP"'"])'
-      $CC -O2 ${winXsCflags} -DVERSION='"1.31"' -DXS_VERSION='"1.31"' -I"$CORE" -Ic -Ilib/Params/Validate -c PV_XS.c -o PV_XS.o
+      $CC -O2 ${winXsCflags} -DVERSION='"${pp.ParamsValidate.version}"' -DXS_VERSION='"${pp.ParamsValidate.version}"' -I"$CORE" -Ic -Ilib/Params/Validate -c PV_XS.c -o PV_XS.o
       $AR cr PV_XS.a PV_XS.o )
     ALLA="$ALLA params/PV_XS.a"; EXTS="$EXTS Params/Validate/XS"
 
     # ===== VFS objects + dispatch (shared unpin-vfs core, zstd, self-EOF) =====
-    $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -I${ulib.vfsCore} -c ${ulib.vfsCore}/vfs.c -o vfs.o
-    $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -I${ulib.vfsCore} -c ${ulib.vfsCore}/miniz.c -o miniz.o
-    $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I${ulib.vfsCore} -c ${ulib.vfsCore}/unpin_zstd.c -o unpin_zstd.o
-    $CC -O2 -std=gnu17 -c ${./src/dispatch.c} -o dispatch.o
+    # From basenames copied into cwd, as flake.nix does: an absolute store
+    # source path is kept in the object and would ship as a store ref.
+    cp ${ulib.vfsCore}/*.c ${ulib.vfsCore}/*.h ${./src}/dispatch.c .
+    $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -DUNPIN_VFS_SELF -I. -c vfs.c -o vfs.o
+    $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -I. -c miniz.c -o miniz.o
+    $CC -O2 -std=gnu17 -DMINIZ_USE_ZSTD -DUNPIN_ZSTD_VENDORED -I. -c unpin_zstd.c -o unpin_zstd.o
+    $CC -O2 -std=gnu17 -c dispatch.c -o dispatch.o
 
     # Stage @INC: every `use lib` tree from the build-host biber driver under
     # /zip/inc/NNN (arch subdirs keyed on the build-host archname, where the
@@ -350,7 +360,7 @@ let
     done
     # win perl stdlib (privlib carries the MSWin32-x64 arch subdir).
     mkdir -p stage/inc/perl
-    cp -rL "${winPerl}/lib/perl5/5.42.0"/. stage/inc/perl/
+    cp -rL "${winPerl}/${privSub}"/. stage/inc/perl/
     # Win32.pm so `require Win32` resolves at runtime (its bootstrap finds the
     # statically-linked boot_Win32, installing GetCwd/GetFullPathName as XSUBs).
     cp win32mod/Win32.pm stage/inc/perl/Win32.pm
@@ -374,11 +384,12 @@ let
     # file_exist_check, check_empty, check_exists -- each takes $filename): for a
     # /zip path the condition is now false, so it falls through to File::Slurper /
     # -e, which open via perl -> the VFS. Real user files still take the Win32::
-    # Unicode path, so non-ASCII filenames keep working. (After chmod -R u+w: the
-    # staged trees come read-only from the store, so sed -i needs the dirs writable.)
-    find stage/inc -path '*Biber/Utils.pm' | while read -r u; do
-      sed -i 's|and not is_Unicode_system() ) {|and not is_Unicode_system() and $filename !~ m{^[/\\\\]zip[/\\\\]} ) {|g' "$u"
-    done
+    # Unicode path, so non-ASCII filenames keep working. Patched here, not in a
+    # patchPhase: the file is staged from the build-host biber's output.
+    u="$(find stage/inc -path '*Biber/Utils.pm')"
+    { [ -n "$u" ] && [ "$(echo "$u" | wc -l)" = 1 ]; } \
+      || { echo "Biber/Utils.pm: expected one, found: $u" >&2; exit 1; }
+    patch "$u" < ${./patches/biber-utils-zip-paths.patch}
     # Windows-only pure-Perl deps missing from the linux closure (see let binding).
     SQ="$(find ${win32ShellQuote} -name 'ShellQuote.pm' -path '*Win32*' | head -1)"
     mkdir -p stage/inc/perl/Win32
@@ -403,8 +414,8 @@ let
       # never terminates on the virtual /zip path, so biber would spin forever
       # stat-ing /zip/bin/. @INC is already fully pinned above, so adding
       # $FindBin::RealBin (=/zip/bin, no modules there) is redundant anyway, and
-      # no Biber module references $FindBin. (Linux keeps it: XS abs_path resolves
-      # /zip cleanly. Biber::Config's abs_path calls are on real-FS config paths.)
+      # no Biber module references $FindBin. (Linux turns the same line into a
+      # no-op. Biber::Config's abs_path calls are on real-FS config paths.)
       tail -n +3 ${biber}/bin/biber \
         | sed -E '/^use FindBin;/d; /^use lib \$FindBin::RealBin;/d'
     } > stage/bin/biber

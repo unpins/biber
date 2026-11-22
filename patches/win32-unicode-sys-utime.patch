@@ -1,0 +1,14 @@
+Include <sys/utime.h> for struct _utimbuf and _wutime.
+
+MSVC gets them through <sys/stat.h>; mingw does not.
+
+--- a/xs/File.xs
++++ b/xs/File.xs
+@@ -8,6 +8,7 @@
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <windows.h>
++#include <sys/utime.h>
+ 
+ #ifdef __CYGWIN__
+     #define _STAT(file, st) stat(file, st)

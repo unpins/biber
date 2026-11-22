@@ -1,0 +1,18 @@
+Read errno.h through the compiler, not as a file.
+
+Errno_pm.PL scans errno.h as a file to collect the E* names, but the
+engine's musl headers are virtual, so it finds "No error definitions".
+Hand get_files a one-line TU that includes errno.h; the generator then
+expands it with the engine cc.
+
+--- a/ext/Errno/Errno_pm.PL
++++ b/ext/Errno/Errno_pm.PL
+@@ -106,7 +106,7 @@
+     return "$cppstdin $Config{cppflags} $Config{cppminus}";
+ }
+ 
+-sub get_files {
++sub get_files { if (open(my $s, ">", "unpin_errno.c")) { print $s "#include <errno.h>\n"; close $s; return ("unpin_errno.c"); }
+     my @file;
+     # When cross-compiling we may store a path for gcc's "sysroot" option:
+     my $sysroot = $Config{sysroot} || '';

@@ -37,12 +37,10 @@
           sp = pkgs.pkgsStatic;
           lib = pkgs.lib;
           # The static perl. The ext/re static extension re-emits regexp-aux
-          # symbols (Perl_set_ANYOF_arg, …) already in libperl.a; native musl-ld
-          # silently dedups, but the cross ld.bfd (riscv64/ppc64le/armv7l,
-          # binutils 2.46) treats it as a fatal multiple-definition. The patch
-          # fires -DPERL_EXT_RE_STATIC whenever usedl is undef (always true for
-          # this -Uusedl perl), suppressing the duplicate at the source. Benign
-          # for the arches that linked before.
+          # symbols (Perl_set_ANYOF_arg, …) already in libperl.a, which lld
+          # treats as a fatal multiple definition. The patch fires
+          # -DPERL_EXT_RE_STATIC whenever usedl is undef (always true for this
+          # -Uusedl perl), suppressing the duplicate at the source.
           host = sp.stdenv.hostPlatform;
           isDarwin = host.isDarwin or false;
           prefix = sp.stdenv.cc.targetPrefix;
@@ -78,7 +76,15 @@
               in if crossCompiling && isDarwin
               then builtins.filter (p: !(lib.hasInfix "no-sys-dirs" (toString p))) base
               else base
-            ) ++ [ ./patches/ext-re-static-aux.patch ];
+            ) ++ [ ./patches/ext-re-static-aux.patch ]
+            # Same two fixes unpins/perl applies for darwin (see configureFlags).
+            ++ lib.optional isDarwin ./patches/installperl-useshrplib.patch
+            # Engine native: the engine cc emits musl headers under the virtual
+            # clang-VFS sysroot; makedepend must not record them.
+            ++ lib.optional (!crossCompiling) ./patches/makedepend-engine-headers.patch
+            # Engine Linux cross: Errno.pm's generator reads errno.h through the
+            # cc (native finds errno.h via engineIncFix's locincpth).
+            ++ lib.optional (crossCompiling && !isDarwin) ./patches/errno-engine-headers.patch;
             # darwin: pkgsStatic.perl's libperl.a rule dies "Error 127" (ranlib
             # not found) and installperl runs install_name_tool because it tests
             # $Config{useshrplib} (the string 'false', truthy in perl). Same two
@@ -146,34 +152,11 @@
                 export HOSTCFLAGS="-fno-strict-aliasing -fwrapv"
               '';
             postPatch = crossBasePostPatch
-              + lib.optionalString isDarwin ''
-                substituteInPlace installperl \
-                  --replace-fail '&& $Config{useshrplib}' '&& $Config{useshrplib} eq "true"'
-              ''
               # perl-cross has no darwin support and assumes an ELF build host
               # (readelf/objdump); on a darwin build host (the darwin<->darwin
               # cross) rewrite those probes to compile-only, cross-safe forms.
               + lib.optionalString (crossCompiling && isDarwin) ''
                 ${bperl} ${./src/cross_darwin.pl}
-              ''
-              # Engine native: the engine cc emits musl headers under the virtual
-              # clang-VFS sysroot /__unpin_ziglib__/...; perl's makedepend records
-              # them as prerequisites and make dies "No rule to make target
-              # .../alloca.h". Drop them in makedepend_file.SH's line-marker sed.
-              + lib.optionalString (!crossCompiling) ''
-                substituteInPlace makedepend_file.SH --replace-fail \
-                  ${lib.escapeShellArg "-e '/^#.*<built-in>/d' \\"} \
-                  ${lib.escapeShellArg "-e '/^#.*<built-in>/d' -e '\\#/__unpin_ziglib__#d' \\"}
-              ''
-              # Engine cross: Errno.pm's generator scans errno.h AS A FILE to harvest
-              # E* macro names, but the engine's musl headers are virtual -> "No error
-              # definitions found". Short-circuit get_files to a stub TU the engine cc
-              # expands (`clang -E -dM` over `#include <errno.h>`). Linux cross only
-              # (native finds errno.h via engineIncFix's locincpth).
-              + lib.optionalString (crossCompiling && !isDarwin) ''
-                substituteInPlace ext/Errno/Errno_pm.PL --replace-fail \
-                  'sub get_files {' \
-                  'sub get_files { if (open(my $s, ">", "unpin_errno.c")) { print $s "#include <errno.h>\n"; close $s; return ("unpin_errno.c"); }'
               '';
             # perl-cross (the true-cross path) builds each static XS .a but its
             # `static_modules` recipe never runs pm_to_blib, so the modules' .pm
@@ -185,7 +168,7 @@
                 ${bperl} ${./src/cross_static_pm.pl} Makefile
               '';
           });
-          # --- platform knobs (mirror the proven spike playground/biber) ---
+          # --- platform knobs ---
           # darwin has no musl off64 hack. crypt.h / libcrypt / libiconv aren't on
           # darwin's default paths but perl's recorded ccflags/ldopts reference them.
           # (The VFS bind is IR symbol rewrite for every platform now -- no per-OS
@@ -207,7 +190,7 @@
           # armv7l, windows), the codegen perl can't be the target perl. Drive
           # the Perl-side steps (Makefile.PL, xsubpp, writemain, ldopts, Config
           # queries) with the build-host perl pointed at the target archlib:
-          # Config_heavy.pl is plain data and both are perl 5.42.0, so MakeMaker
+          # Config_heavy.pl is plain data and both are the same perl, so MakeMaker
           # emits a Makefile with the target cc/ccflags/CORE while codegen
           # (Config-free) runs on the host; the C is compiled by the cross $CC.
           # This is how nixpkgs/perl-cross cross-builds native modules.
@@ -236,8 +219,9 @@
           # LTO-linked. perl's Configure / perl-cross introspect real headers and
           # objects, which the engine serves virtually / as bitcode -> the same
           # fixes unpins/perl applies. The VFS is bound by IR symbol rewrite in the
-          # relink (below), not `ld --wrap` / `objcopy --redefine-sym` (neither can
-          # touch a bitcode symtab). `ep` = the `llvm` multitool, the perl-cross
+          # ELF/Mach-O relink (below), not `ld --wrap` / `objcopy --redefine-sym`
+          # (neither can touch a bitcode symtab; windows.nix uses lld's --wrap).
+          # `ep` = the `llvm` multitool, the perl-cross
           # bitcode-introspection helper, and the VFS IR-rewrite shell fns
           # (vfsSed & co) — same source unpins/perl uses, so the fix-prone vfsSed
           # can't drift between the two.
@@ -269,7 +253,7 @@
             pname = "biber";
             version = biber.version or "2.21";
             dontUnpack = true;
-            nativeBuildInputs = [ perl pkgs.buildPackages.perl pkgs.file ];
+            nativeBuildInputs = [ perl pkgs.buildPackages.perl ];
             buildInputs = [ sp.libxml2 sp.libxslt ];
             PURE_XS_LIST = pureXsList;
             TEXTBIBTEX_SRC = pp.TextBibTeX.src;
@@ -365,8 +349,8 @@
                     -e 's|\[% STRLCAT %\]|define HAVE_STRLCAT 1|' \
                     -e 's|\[% VSNPRINTF %\]|define HAVE_VSNPRINTF 1|' \
                     -e 's|\[% PACKAGE %\]|"libbtparse"|g' \
-                    -e 's|\[% FPACKAGE %\]|"libbtparse 0.91"|' \
-                    -e 's|\[% VERSION %\]|"0.91"|' \
+                    -e 's|\[% FPACKAGE %\]|"libbtparse ${pp.TextBibTeX.version}"|' \
+                    -e 's|\[% VERSION %\]|"${pp.TextBibTeX.version}"|' \
                     btparse/src/bt_config.h.in > btparse/src/bt_config.h
                 for c in btparse/src/*.c; do
                   $CC -O2 -D_FORTIFY_SOURCE=1 -Ibtparse/src -Ibtparse/pccts -c "$c" -o "''${c%.c}.o"
@@ -374,7 +358,7 @@
                 $AR cr libbtparse.a btparse/src/*.o
                 $PERL -MExtUtils::ParseXS -e \
                   'ExtUtils::ParseXS->new->process_file(filename=>"xscode/BibTeX.xs", output=>"BibTeX.c", typemap=>["'"$PRIVLIB"'/ExtUtils/typemap","'"$PWD"'/typemap"])'
-                $CC -O2 $CCFLAGS -DVERSION='"0.91"' -DXS_VERSION='"0.91"' -I"$ARCHLIB/CORE" -Ibtparse/src -Ixscode -c BibTeX.c -o BibTeX.o
+                $CC -O2 $CCFLAGS -DVERSION='"${pp.TextBibTeX.version}"' -DXS_VERSION='"${pp.TextBibTeX.version}"' -I"$ARCHLIB/CORE" -Ibtparse/src -Ixscode -c BibTeX.c -o BibTeX.o
                 $CC -O2 $CCFLAGS -I"$ARCHLIB/CORE" -Ibtparse/src -Ixscode -c xscode/btxs_support.c -o btxs_support.o
                 $AR cr BibTeX.a BibTeX.o btxs_support.o )
               ALLA="$ALLA bibtex/BibTeX.a bibtex/libbtparse.a"; EXTS="$EXTS Text/BibTeX"
@@ -412,7 +396,7 @@
                   make -j$NIX_BUILD_CORES CC="$CC" LD="$CC" AR="$AR" OPTIMIZE="-O2" >/dev/null )
                 $PERL -MExtUtils::ParseXS -e \
                   'ExtUtils::ParseXS->new->process_file(filename=>"LineBreak.xs", output=>"LineBreak.c", typemap=>["'"$PRIVLIB"'/ExtUtils/typemap","'"$PWD"'/typemap"])'
-                $CC -O2 $CCFLAGS -DVERSION='"2019.001"' -DXS_VERSION='"2019.001"' -I"$ARCHLIB/CORE" -Isombok/include -I. -c LineBreak.c -o LineBreak.o
+                $CC -O2 $CCFLAGS -DVERSION='"${pp.UnicodeLineBreak.version}"' -DXS_VERSION='"${pp.UnicodeLineBreak.version}"' -I"$ARCHLIB/CORE" -Isombok/include -I. -c LineBreak.c -o LineBreak.o
                 $AR cr LineBreak.a LineBreak.o )
               ALLA="$ALLA linebreak/LineBreak.a $(find linebreak/sombok -name 'libsombok*.a' | head -1)"; EXTS="$EXTS Unicode/LineBreak"
 
@@ -421,7 +405,7 @@
               ( cd params
                 $PERL -MExtUtils::ParseXS -e \
                   'ExtUtils::ParseXS->new->process_file(filename=>"lib/Params/Validate/XS.xs", output=>"PV_XS.c", typemap=>["'"$PRIVLIB"'/ExtUtils/typemap"])'
-                $CC -O2 $CCFLAGS -DVERSION='"1.31"' -DXS_VERSION='"1.31"' -I"$ARCHLIB/CORE" -Ic -Ilib/Params/Validate -c PV_XS.c -o PV_XS.o
+                $CC -O2 $CCFLAGS -DVERSION='"${pp.ParamsValidate.version}"' -DXS_VERSION='"${pp.ParamsValidate.version}"' -I"$ARCHLIB/CORE" -Ic -Ilib/Params/Validate -c PV_XS.c -o PV_XS.o
                 $AR cr PV_XS.a PV_XS.o )
               ALLA="$ALLA params/PV_XS.a"; EXTS="$EXTS Params/Validate/XS"
 
@@ -652,11 +636,10 @@
         # Build via the unpin-llvm engine: pkgsStatic is swapped to the engine
         # stdenv, so perl + the 19 hand-built XS + libxml2/libxslt all compile to
         # LLVM bitcode and the binary is LTO-linked (whole-program opt, the same
-        # toolchain perl/curl/nmap/tcc use). Every Linux and darwin target is on
-        # the engine, the crosses included; windows (windows.nix) is a gcc mingw
-        # build. The /zip
-        # @INC embed is unchanged; the VFS is bound by IR symbol rewrite in `mk`
-        # (bitcode has no `--wrap` / objcopy).
+        # toolchain perl/curl/nmap/tcc use). Every target is on the engine, the
+        # crosses and Windows (windows.nix) included. On Linux and darwin the VFS
+        # is bound by IR symbol rewrite in `mk` (bitcode has no objcopy); the
+        # Windows relink uses lld's --wrap.
         engine = "unpin-llvm";
         # biber runs a single embedded driver, so there is nothing to fold and
         # nothing to dispatch. The block is here to put the `.exe` on the engine
@@ -674,11 +657,12 @@
         # so the VFS is exercised.
         smokePattern = "^biber version: 2\\.";
         # The binary bakes perl's compiled-in @INC (four lib/perl5 dirs under the
-        # static perl) and libxml2's default etc/xml/catalog. All five are dead:
+        # static perl, the mingw perl on Windows) and libxml2's default
+        # etc/xml/catalog. All five are dead:
         # main pins @INC to the /zip tree and none of the paths ship. Nix still
         # counts them as runtime refs, and those two drag 174.8 MB of closure
         # behind a 32 MB binary.
-        removeReferences = [ "perl-static" "libxml2-static" ];
+        removeReferences = [ "perl-static" "libxml2-static" "perl-x86_64-w64-mingw32" ];
         build = pkgs: mk pkgs;
         # Windows is mingw-NATIVE (not cosmo): nixpkgs' perl-cross only gets
         # part-way, so windows.nix runs winfix-spike.sh (postConfigure) to make a
@@ -702,9 +686,8 @@
     in
     # Ship: x86_64/aarch64-linux (native) + the four cross-linux arches
     # (i686/ppc64le/riscv64/armv7l, via the build-host-perl codegen flow) +
-    # aarch64-darwin (native) + `darwin-x86_64` (the darwin<->darwin cross,
-    # which this flake already supports — cross_darwin.pl, the $INODE64
-    # redefs). CI has no x86_64-darwin runner, so that cross attr is the
+    # aarch64-darwin (native) + `darwin-x86_64` (the darwin<->darwin cross:
+    # cross_darwin.pl here, the $INODE64 redefs in nix-lib). CI has no x86_64-darwin runner, so that cross attr is the
     # ONLY path to an Intel macOS release asset; the native x86_64-darwin
     # output only ever builds locally.
     base;
