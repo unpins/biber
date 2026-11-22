@@ -1,0 +1,45 @@
+Leave the default CA to OpenSSL when nothing else is found.
+
+The binary carries no Mozilla::CA: its cacert.pem would sit in the
+embedded /zip tree, which OpenSSL's fopen cannot read. With no explicit
+CA and none of the files IO::Socket::SSL probes, call
+CTX_set_default_verify_paths: the statically linked OpenSSL looks in the
+distributions' locations and falls back to its embedded Mozilla roots.
+
+--- a/IO/Socket/SSL.pm
++++ b/IO/Socket/SSL.pm
+@@ -535,10 +535,9 @@
+ 	    }
+ 	}
+ 
+-	$default_ca{SSL_ca_file} = Mozilla::CA::SSL_ca_file() if ! %default_ca && do {
+-		local $SIG{__DIE__};
+-		eval { require Mozilla::CA; 1 };
+-	    };
++	# Nothing found: leave it to OpenSSL's own default lookup, which knows
++	# more locations and carries embedded roots for hosts with none.
++	$default_ca{SSL_openssl_default_paths} = 1 if ! %default_ca;
+ 
+ 	$ca_detected = 1;
+ 	return %default_ca;
+@@ -2596,6 +2595,12 @@
+ 	    }
+ 	} elsif ( my %ca = IO::Socket::SSL::default_ca()) {
+ 	    # no CA path given, continue with system defaults
++	    if ($ca{SSL_openssl_default_paths}) {
++		Net::SSLeay::CTX_set_default_verify_paths($ctx)
++		    or $verify_mode == $Net_SSLeay_VERIFY_NONE
++		    or return IO::Socket::SSL->error(
++			"Cannot load the default certificate authorities");
++	    } else {
+ 	    my $dir = $ca{SSL_ca_path};
+ 	    $dir = join($OPENSSL_LIST_SEPARATOR,@$dir) if ref($dir);
+ 	    if (! Net::SSLeay::CTX_load_verify_locations( $ctx,
+@@ -2604,6 +2609,7 @@
+ 		return IO::Socket::SSL->error(
+ 		    "Invalid default certificate authority locations")
+ 	    }
++	    }
+ 	}
+ 
+ 	if ($is_server && ($verify_mode & $Net_SSLeay_VERIFY_PEER)) {

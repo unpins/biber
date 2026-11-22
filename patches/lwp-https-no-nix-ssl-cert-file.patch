@@ -1,0 +1,18 @@
+Do not trust NIX_SSL_CERT_FILE.
+
+nixpkgs adds it for nix-built programs; a standalone binary must not
+trust a file because nix happens to be installed (nix-lib drops the same
+patch from OpenSSL).
+
+--- a/LWP/Protocol/https.pm
++++ b/LWP/Protocol/https.pm
+@@ -29,9 +29,6 @@
+         }
+     }
+     if ($ssl_opts{SSL_verify_mode}) {
+-        if ($ENV{NIX_SSL_CERT_FILE}) {
+-            $ssl_opts{SSL_ca_file} //= $ENV{NIX_SSL_CERT_FILE};
+-        }
+         unless (exists $ssl_opts{SSL_ca_file} || exists $ssl_opts{SSL_ca_path}) {
+             if ($Net::HTTPS::SSL_SOCKET_CLASS eq 'IO::Socket::SSL'
+                 && defined &IO::Socket::SSL::default_ca

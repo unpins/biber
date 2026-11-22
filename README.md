@@ -51,10 +51,14 @@ The [Releases](https://github.com/unpins/biber/releases) page has standalone bin
 
 biber is a Perl program. The binary carries the Perl interpreter, biber itself
 and all of the roughly 100 modules it uses, compiled ones included, so it needs
-no Perl installation and reads nothing from disk except your own files.
+no Perl installation.
 
-- Remote data sources work over `http://` but not `https://`: the TLS module
-  (`Net::SSLeay`) is not included. Local `.bib` and BibLaTeXML files are
-  unaffected.
-- The build runs biber's own test documents through the binary and checks that
-  every `.bbl` matches the one the reference biber produces.
+- Remote data sources work over `http://` and `https://`. Certificates are
+  checked against the system's CA store, or against built-in Mozilla roots on a
+  system without one; `SSL_CERT_FILE` and `PERL_LWP_SSL_CA_FILE` still choose
+  another.
+- On Windows the binary unpacks the modules it loads into short-lived
+  temporary files in `%TEMP%` while it runs.
+- Tests: biber's own test documents run through the binary wherever the build
+  can execute it, and every `.bbl` must match the one the reference biber
+  produces.

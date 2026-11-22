@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Remote data sources over `https://` work. They failed with `Can't load module
+  Net::SSLeay`: the TLS module was not in the binary.
+
 - On Windows, `--input-encoding` and `--output-encoding` accepted only UTF-8,
   UTF-16/32, ASCII, Latin-1 and cp1252; any other encoding (`latin2`, `koi8-r`,
   `shiftjis`, …) failed with `Unknown encoding`. The binary grows from 29.9 MB

@@ -1,0 +1,38 @@
+Leave the CA lookup to IO::Socket::SSL and OpenSSL.
+
+With no Mozilla::CA in the binary, biber fell through to its "fallbacks
+for, e.g., linux" and pointed LWP at the first of /etc/ssl/certs/ and
+/etc/pki/tls/ that exists as a directory. On macOS /etc/ssl/certs is an
+empty directory, so every https fetch failed verification. OpenSSL's own
+default lookup knows these locations and more.
+
+--- a/Biber/Utils.pm
++++ b/Biber/Utils.pm
+@@ -250,27 +250,6 @@
+           $ENV{PERL_LWP_SSL_CA_FILE} = File::Spec->catpath($vol, "$dir/CA", 'cacert.pem');
+         }
+ 
+-        # fallbacks for, e.g., linux
+-        unless (exists($ENV{PERL_LWP_SSL_CA_FILE})) {
+-          foreach my $ca_bundle (qw{
+-                                     /etc/ssl/certs/ca-certificates.crt
+-                                     /etc/pki/tls/certs/ca-bundle.crt
+-                                     /etc/ssl/ca-bundle.pem
+-                                 }) {
+-            next if ! -e $ca_bundle;
+-            $ENV{PERL_LWP_SSL_CA_FILE} = $ca_bundle;
+-            last;
+-          }
+-          foreach my $ca_path (qw{
+-                                   /etc/ssl/certs/
+-                                   /etc/pki/tls/
+-                               }) {
+-            next if ! -d $ca_path;
+-            $ENV{PERL_LWP_SSL_CA_PATH} = $ca_path;
+-            last;
+-          }
+-        }
+-
+         if (defined(Biber::Config->getoption('ssl-noverify-host'))) {
+           $ENV{PERL_LWP_SSL_VERIFY_HOSTNAME} = 0;
+         }

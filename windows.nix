@@ -36,6 +36,10 @@ let
   msc = ulib.mingwStaticCross pkgs;
   winLibxml2 = msc.libxml2;
   winLibxslt = msc.libxslt;
+  # OpenSSL for Net::SSLeay with the same retarget as the openssl package's
+  # Windows build: C:\ssl for openssl.cnf, CA roots from Windows' ROOT store
+  # plus the embedded Mozilla set (never from C:\ssl).
+  winOpenssl = msc.openssl.overrideAttrs (ulib.retargetOpenssl "C:/ssl");
 
   # Windows-only pure-Perl deps the build-host (linux) biber closure omits because
   # they are loaded only `if $^O eq 'MSWin32'`. IPC::Run3 (in biber's closure)
@@ -142,6 +146,7 @@ let
   XMLLIBXSLT_SRC = pp.XMLLibXSLT.src;
   LINEBREAK_SRC = pp.UnicodeLineBreak.src;
   PARAMSVALIDATE_SRC = pp.ParamsValidate.src;
+  NETSSLEAY_SRC = pp.NetSSLeay.src;
   # perl source tarball -> its bundled cpan/Win32 (the Win32 module, an XS that
   # wraps the native Win32 API). Not a standalone perlPackage, so take it from
   # the perl dist; the same source the interpreter is built from.
@@ -333,6 +338,15 @@ let
       $AR cr PV_XS.a PV_XS.o )
     ALLA="$ALLA params/PV_XS.a"; EXTS="$EXTS Params/Validate/XS"
 
+    # ===== (7) Net::SSLeay (+ static mingw OpenSSL) =====
+    mkdir -p ssleay && tar xf "$NETSSLEAY_SRC" -C ssleay --strip-components=1
+    ( cd ssleay
+      $PERL -MExtUtils::ParseXS -e \
+        'ExtUtils::ParseXS->new->process_file(filename=>"SSLeay.xs", output=>"SSLeay.c", typemap=>["'"$TYPEMAP"'","'"$PWD"'/typemap"])'
+      $CC -O2 ${winXsCflags} -DVERSION='"${pp.NetSSLeay.version}"' -DXS_VERSION='"${pp.NetSSLeay.version}"' -I"$CORE" -I${lib.getDev winOpenssl}/include -I. -c SSLeay.c -o SSLeay.o
+      $AR cr SSLeay.a SSLeay.o )
+    ALLA="$ALLA ssleay/SSLeay.a"; EXTS="$EXTS Net/SSLeay"
+
     # ===== VFS objects + dispatch (shared unpin-vfs core, zstd, self-EOF) =====
     # From basenames copied into cwd, as flake.nix does: an absolute store
     # source path is kept in the object and would ship as a store ref.
@@ -420,6 +434,16 @@ let
         | sed -E '/^use FindBin;/d; /^use lib \$FindBin::RealBin;/d'
     } > stage/bin/biber
 
+    # https, as in flake.nix: no Mozilla::CA, IO::Socket::SSL falls back to
+    # OpenSSL's default lookup, LWP stops trusting NIX_SSL_CERT_FILE.
+    find stage/inc -depth -path '*/Mozilla/CA*' -exec rm -rf {} +
+    for pm in IO/Socket/SSL.pm:io-socket-ssl-openssl-default-ca LWP/Protocol/https.pm:lwp-https-no-nix-ssl-cert-file Biber/Utils.pm:biber-utils-no-ca-fallbacks; do
+      u="$(find stage/inc -path "*/''${pm%%:*}")"
+      { [ -n "$u" ] && [ "$(echo "$u" | wc -l)" = 1 ]; } \
+        || { echo "''${pm%%:*}: expected one, found: $u" >&2; exit 1; }
+      chmod u+w "$u"; patch "$u" < ${./patches}/''${pm#*:}.patch
+    done
+
     # Scrub /nix store paths out of EVERY staged text file: the STORED shared
     # dict (trained by the nix-lib embed) would otherwise bake store-path hashes
     # verbatim, making nix retain biber's whole module closure as spurious refs.
@@ -454,8 +478,9 @@ let
     $CC -O2 -o biber.exe $WRAP \
       perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o \
       $ALLA $COREA "$EXSLT_A" "$XSLT_A" "$XML2_A" "$Z_A" "$ICONV_A" \
+      ${lib.getLib winOpenssl}/lib/libssl.a ${lib.getLib winOpenssl}/lib/libcrypto.a \
       "$CORE/libperl.a" -Wl,--allow-multiple-definition \
-      $SYSLIBS $EXTRALIBS -lbcrypt -luserenv -lwinhttp
+      $SYSLIBS $EXTRALIBS -lbcrypt -luserenv -lwinhttp -lcrypt32 -lws2_32
     file biber.exe
     runHook postBuild
   '';

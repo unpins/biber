@@ -25,9 +25,10 @@
   #
   # The four XS that carry an external C library are linked statically too:
   # Text::BibTeX (bundled btparse), Unicode::LineBreak (bundled sombok),
-  # XML::LibXML (system libxml2), XML::LibXSLT (system libxslt/libexslt). The
-  # only XS left out is Net::SSLeay (https remote datasources) -- biber runs
-  # fully offline without it.
+  # XML::LibXML (system libxml2), XML::LibXSLT (system libxslt/libexslt), and
+  # Net::SSLeay (OpenSSL, for https remote datasources). CA roots come from
+  # OpenSSL's own default lookup, the nix-lib fallback: see
+  # patches/io-socket-ssl-openssl-default-ca.patch.
   outputs = { self, unpins-lib }:
     let
       ulib = unpins-lib.lib;
@@ -261,6 +262,7 @@
             XMLLIBXSLT_SRC = pp.XMLLibXSLT.src;
             LINEBREAK_SRC = pp.UnicodeLineBreak.src;
             PARAMSVALIDATE_SRC = pp.ParamsValidate.src;
+            NETSSLEAY_SRC = pp.NetSSLeay.src;
             meta = (biber.meta or { }) // { mainProgram = "biber"; };
 
             buildPhase = ''
@@ -409,6 +411,15 @@
                 $AR cr PV_XS.a PV_XS.o )
               ALLA="$ALLA params/PV_XS.a"; EXTS="$EXTS Params/Validate/XS"
 
+              # ===== (7) Net::SSLeay (+ static OpenSSL, with nix-lib's CA fallback) =====
+              mkdir -p ssleay && tar xf "$NETSSLEAY_SRC" -C ssleay --strip-components=1
+              ( cd ssleay
+                $PERL -MExtUtils::ParseXS -e \
+                  'ExtUtils::ParseXS->new->process_file(filename=>"SSLeay.xs", output=>"SSLeay.c", typemap=>["'"$PRIVLIB"'/ExtUtils/typemap","'"$PWD"'/typemap"])'
+                $CC -O2 $CCFLAGS -DVERSION='"${pp.NetSSLeay.version}"' -DXS_VERSION='"${pp.NetSSLeay.version}"' -I"$ARCHLIB/CORE" -I${lib.getDev sp.openssl}/include -I. -c SSLeay.c -o SSLeay.o
+                $AR cr SSLeay.a SSLeay.o )
+              ALLA="$ALLA ssleay/SSLeay.a"; EXTS="$EXTS Net/SSLeay"
+
               # ===== VFS objects (shared unpin-vfs core: src/vfs.c + src/miniz.c,
               # github:unpins/unpin-vfs, zstd path, self-EOF mode) =====
               # Compile from basenames copied into cwd (not from an absolute
@@ -496,6 +507,20 @@
                 tail -n +3 ${biber}/bin/biber | sed 's|^use lib $FindBin::RealBin;.*|1;|'
               } > stage/bin/biber
 
+              # https: no Mozilla::CA (its cacert.pem would be a /zip path, which
+              # OpenSSL's fopen cannot read; biber points LWP at it when present),
+              # IO::Socket::SSL falls back to OpenSSL's default lookup, LWP stops
+              # trusting NIX_SSL_CERT_FILE, and biber drops its own guesses
+              # (an empty /etc/ssl/certs on macOS broke every fetch). Patched here, not in a
+              # patchPhase: the files are staged from the build-host biber.
+              find stage/inc -depth -path '*/Mozilla/CA*' -exec rm -rf {} +
+              for pm in IO/Socket/SSL.pm:io-socket-ssl-openssl-default-ca LWP/Protocol/https.pm:lwp-https-no-nix-ssl-cert-file Biber/Utils.pm:biber-utils-no-ca-fallbacks; do
+                u="$(find stage/inc -path "*/''${pm%%:*}")"
+                { [ -n "$u" ] && [ "$(echo "$u" | wc -l)" = 1 ]; } \
+                  || { echo "''${pm%%:*}: expected one, found: $u" >&2; exit 1; }
+                chmod u+w "$u"; patch "$u" < ${./patches}/''${pm#*:}.patch
+              done
+
               # Scrub /nix store paths out of EVERY staged text file: the STORED
               # shared dict (trained by the nix-lib embed) would bake store-path
               # hashes verbatim -- nix would then retain biber's whole module
@@ -569,6 +594,7 @@
               $CC -O2 -o biber \
                 perlmain.o vfs.o miniz.o unpin_zstd.o dispatch.o \
                 $ALLA $COREA_VFS "$EXSLT_A" "$XSLT_A" "$XML2_A" \
+                ${lib.getLib sp.openssl}/lib/libssl.a ${lib.getLib sp.openssl}/lib/libcrypto.a \
                 $LDO libperl_vfs.a -lm
               runHook postBuild
             '';
